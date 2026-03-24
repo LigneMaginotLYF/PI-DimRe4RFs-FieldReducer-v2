@@ -29,8 +29,10 @@ def tiny_cfg() -> dict:
                 "nu_ref": 1.5,
                 "length_scale_sampling": False,
                 "length_scale_ref": 0.3,
-                "logE_std": 1.0,
-                "E_ref": 10.0e6,
+                # Unified format (new)
+                "mean": 10.0e6,
+                "range": [5.0e6, 20.0e6],
+                "fluctuation_std": 1.0,
                 "force_identity_reduction": False,
             },
             "k_h": {
@@ -42,7 +44,10 @@ def tiny_cfg() -> dict:
                 "nu_ref": 1.5,
                 "length_scale_sampling": False,
                 "length_scale_ref": 0.3,
-                "k_range": [1.0e-13, 1.0e-10],
+                # Unified format (new)
+                "mean": 1.0e-12,
+                "range": [1.0e-13, 1.0e-10],
+                "fluctuation_std": 0.5,
                 "force_identity_reduction": False,
             },
             "k_v": {
@@ -54,7 +59,10 @@ def tiny_cfg() -> dict:
                 "nu_ref": 1.5,
                 "length_scale_sampling": False,
                 "length_scale_ref": 0.3,
-                "k_range": [1.0e-13, 1.0e-10],
+                # Unified format (new)
+                "mean": 1.0e-12,
+                "range": [1.0e-13, 1.0e-10],
+                "fluctuation_std": 0.5,
                 "force_identity_reduction": False,
             },
         },

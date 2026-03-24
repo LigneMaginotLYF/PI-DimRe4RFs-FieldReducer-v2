@@ -40,6 +40,7 @@ from .config_manager import ConfigManager
 from .field_manager import FieldManager
 from .forward_solver import BiotSolver
 from .surrogate_models import BaseSurrogate, load_surrogate
+from .phase2_surrogate import _find_surrogate_file
 from .training_schema import build_training_signal
 
 
@@ -137,7 +138,7 @@ class Phase3Reducer:
         surrogate = None
         if signal_type in ("surrogate", "hybrid"):
             print(f"[Phase 3] Loading Phase-2 surrogate from '{self._surrogate_dir}' ...")
-            surrogate = load_surrogate(self._surrogate_dir / "surrogate")
+            surrogate = self._load_phase2_surrogate()
             self._surrogate = surrogate
 
         p3_nn = self._cfg["phase3"]["nn"]
@@ -203,6 +204,46 @@ class Phase3Reducer:
         self._X_mean = np.load(d / "X_mean.npy")
         self._X_std = np.load(d / "X_std.npy")
         return self._reducer
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _load_phase2_surrogate(self) -> BaseSurrogate:
+        """Load the Phase-2 surrogate with dimension validation.
+
+        Searches for a dimension-stamped file matching the current
+        ``total_input_dim``.  Raises :class:`ValueError` with a helpful
+        message if the surrogate dimension does not match the expected
+        Phase-3 input dimension.
+
+        Returns
+        -------
+        BaseSurrogate
+            The loaded and validated surrogate model.
+
+        Raises
+        ------
+        ValueError
+            If no surrogate matching the expected dimension is found.
+        ValueError
+            If the loaded surrogate's ``input_dim`` differs from the
+            expected dimension (should not normally occur, but guards
+            against corrupt metadata).
+        """
+        d_expected = self._fm.total_input_dim
+        surr_path = _find_surrogate_file(self._surrogate_dir, d_expected)
+        surrogate = load_surrogate(surr_path)
+
+        # Validate dimension of loaded surrogate
+        if surrogate.input_dim != d_expected:
+            raise ValueError(
+                f"Phase-2 surrogate input dimension mismatch: "
+                f"expected {d_expected}, got {surrogate.input_dim}. "
+                f"Loaded from: {surr_path}. "
+                "Ensure Phase 2 was run with the same n_terms configuration."
+            )
+        return surrogate
 
     # ------------------------------------------------------------------
     # Private training routines

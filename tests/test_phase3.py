@@ -10,7 +10,11 @@ from pathlib import Path
 
 @pytest.fixture
 def trained_surrogate(tiny_cfg):
-    """Return a fitted surrogate for use in Phase 3 tests."""
+    """Return a fitted surrogate for use in Phase 3 tests.
+
+    The surrogate is saved with a dimension-stamped filename so Phase 3
+    can locate it via ``_find_surrogate_file``.
+    """
     from src.field_manager import FieldManager
     from src.forward_solver import BiotSolver
     from src.surrogate_models import NNSurrogate
@@ -25,9 +29,10 @@ def trained_surrogate(tiny_cfg):
     surrogate = NNSurrogate(d, nx, epochs=3, hidden_dims=[8, 8])
     surrogate.fit(X, Y)
 
-    # Save it where Phase 3 expects it
-    surr_dir = Path(tiny_cfg["phase3"]["surrogate_dir"]) / "surrogate"
-    surrogate.save(surr_dir)
+    # Save with dimension-stamped filename where Phase 3 expects it
+    surr_dir = Path(tiny_cfg["phase3"]["surrogate_dir"])
+    surr_dir.mkdir(parents=True, exist_ok=True)
+    surrogate.save(surr_dir / f"surrogate_nn_dim{d}.pt")
     return surrogate, X, Y
 
 
@@ -91,6 +96,73 @@ class TestPhase3Reducer:
         pred_load = p3_load.reduce(X[:3])
 
         np.testing.assert_allclose(pred_train, pred_load, atol=1e-5)
+
+    def test_dimension_mismatch_raises_value_error(self, tiny_cfg):
+        """Phase 3 must raise ValueError when surrogate internal dim != expected dim."""
+        import copy
+        from src.config_manager import ConfigManager
+        from src.phase3_reducer import Phase3Reducer
+        from src.field_manager import FieldManager
+        from src.forward_solver import BiotSolver
+        from src.surrogate_models import NNSurrogate
+
+        cfg = copy.deepcopy(tiny_cfg)
+        cfg["phase3"]["output_dir"] = "/tmp/test_p3_dimcheck"
+        cfg["phase3"]["surrogate_dir"] = "/tmp/test_p3_wrong_dim_surr"
+
+        # Save a surrogate file whose filename matches the expected dimension (6)
+        # but whose internal input_dim is WRONG (4) — this tests the internal
+        # metadata validation inside _load_phase2_surrogate.
+        correct_dim = 6   # expected by tiny_cfg (3+1+2)
+        wrong_internal_dim = 4
+        nx = cfg["grid"]["n_nodes_x"]
+        surrogate = NNSurrogate(wrong_internal_dim, nx, epochs=2, hidden_dims=[8, 8])
+        import numpy as _np
+        surrogate.fit(
+            _np.random.randn(10, wrong_internal_dim),
+            _np.random.randn(10, nx),
+        )
+
+        surr_dir = Path(cfg["phase3"]["surrogate_dir"])
+        surr_dir.mkdir(parents=True, exist_ok=True)
+        # Filename says "dim6" but internal model has input_dim=4
+        surrogate.save(surr_dir / f"surrogate_nn_dim{correct_dim}.pt")
+
+        cm = ConfigManager(overrides=cfg)
+        fm = FieldManager(cfg)
+        solver = BiotSolver(cfg)
+        X, fields, _ = fm.generate_dataset(8)
+        Y = solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+
+        p3 = Phase3Reducer(cm)
+        with pytest.raises(ValueError, match="dimension mismatch"):
+            p3.run(X, Y)
+
+    def test_missing_surrogate_raises_value_error(self, tiny_cfg):
+        """Phase 3 must raise ValueError when no surrogate file exists."""
+        import copy
+        from src.config_manager import ConfigManager
+        from src.phase3_reducer import Phase3Reducer
+        from src.field_manager import FieldManager
+        from src.forward_solver import BiotSolver
+
+        cfg = copy.deepcopy(tiny_cfg)
+        cfg["phase3"]["output_dir"] = "/tmp/test_p3_nosurr"
+        cfg["phase3"]["surrogate_dir"] = "/tmp/test_p3_empty_surr_dir"
+
+        # Ensure surrogate dir exists but is empty
+        empty_dir = Path(cfg["phase3"]["surrogate_dir"])
+        empty_dir.mkdir(parents=True, exist_ok=True)
+
+        cm = ConfigManager(overrides=cfg)
+        fm = FieldManager(cfg)
+        solver = BiotSolver(cfg)
+        X, fields, _ = fm.generate_dataset(8)
+        Y = solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+
+        p3 = Phase3Reducer(cm)
+        with pytest.raises(ValueError, match="No Phase-2 surrogate found"):
+            p3.run(X, Y)
 
     def test_physics_training_signal(self, tiny_cfg):
         """Test that physics training signal runs without error."""

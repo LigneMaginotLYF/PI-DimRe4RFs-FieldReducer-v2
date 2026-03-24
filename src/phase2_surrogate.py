@@ -12,11 +12,23 @@ Steps
 2. Run the Biot solver on all grid points to build the LUT.
 3. Optionally augment training with Phase-1 data.
 4. Fit an NN or PCE surrogate mapping reduced params → settlement.
-5. Save model + metadata to disk.
+5. Save model + metadata to disk using dimension-stamped filenames.
+
+Dimension-stamped filenames
+---------------------------
+The surrogate is saved as::
+
+    surrogate_{type}_dim{d_total}.pt   (NN)
+    surrogate_{type}_dim{d_total}.pkl  (PCE)
+
+where ``d_total`` is the total input dimension (n_terms_E + 1 + n_terms_kv +
+…).  Phase 3 searches for this file and validates that the dimension matches
+its expected input dimension before loading.
 """
 
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 from pathlib import Path
@@ -105,8 +117,25 @@ class Phase2Surrogate:
         return self._surrogate
 
     def load_surrogate(self) -> BaseSurrogate:
-        """Load a previously trained Phase-2 surrogate."""
-        self._surrogate = load_surrogate(self._output_dir / "surrogate")
+        """Load a previously trained Phase-2 surrogate.
+
+        Searches for a dimension-stamped file
+        ``surrogate_{type}_dim{d_total}.(pt|pkl)`` in the output directory.
+        Falls back to the legacy ``surrogate/`` sub-directory for backward
+        compatibility.
+
+        Returns
+        -------
+        The loaded surrogate model.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no surrogate file is found in the output directory.
+        """
+        d_total = self._fm.total_input_dim
+        surr_path = _find_surrogate_file(self._output_dir, d_total)
+        self._surrogate = load_surrogate(surr_path)
         return self._surrogate
 
     @property
@@ -180,18 +209,82 @@ class Phase2Surrogate:
         np.save(d / "grid_points.npy", grid_X)
         np.save(d / "responses.npy", grid_Y)
 
-        # Save surrogate
-        surr_dir = d / "surrogate"
-        self._surrogate.save(surr_dir)
+        # Save surrogate with dimension-stamped filename
+        surrogate_type = self._cfg["phase2"]["surrogate_type"]
+        d_total = self._fm.total_input_dim
+        ext = "pt" if surrogate_type == "nn" else "pkl"
+        surr_filename = f"surrogate_{surrogate_type}_dim{d_total}.{ext}"
+        self._surrogate.save(d / surr_filename)
 
         # Save config snapshot
         meta = {
-            "input_dim": self._fm.total_input_dim,
+            "input_dim": d_total,
             "n_nodes_x": self._fm.n_nodes_x,
-            "surrogate_type": self._cfg["phase2"]["surrogate_type"],
+            "surrogate_type": surrogate_type,
+            "surrogate_filename": surr_filename,
             "output_repr": self._cfg["phase2"]["output_repr"],
             "n_output_modes": self._cfg["phase2"]["n_output_modes"],
             "config_hash": self._cm.config_hash(),
         }
         with open(d / "config.json", "w") as f:
             json.dump(meta, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper (used by Phase 3 for dimension-validated loading)
+# ---------------------------------------------------------------------------
+
+def _find_surrogate_file(surr_dir: Path, d_expected: int) -> Path:
+    """Find a dimension-stamped surrogate file in *surr_dir*.
+
+    Searches for ``surrogate_*_dim{d_expected}.(pt|pkl)``.  Falls back to the
+    legacy ``surrogate/`` sub-directory for backward compatibility.
+
+    Parameters
+    ----------
+    surr_dir : Path
+        Directory produced by :class:`Phase2Surrogate`.
+    d_expected : int
+        Expected input dimension of the surrogate.
+
+    Returns
+    -------
+    Path
+        Path to the surrogate file or directory.
+
+    Raises
+    ------
+    ValueError
+        If no matching surrogate is found, with a message listing available
+        options to aid diagnosis.
+    """
+    surr_dir = Path(surr_dir)
+    # Search for dimension-stamped files with known extensions only
+    matches = []
+    for ext in ("pt", "pkl"):
+        pattern = str(surr_dir / f"surrogate_*_dim{d_expected}.{ext}")
+        matches.extend(_glob.glob(pattern))
+    if matches:
+        return Path(matches[0])
+
+    # Backward compatibility: legacy surrogate/ sub-directory
+    legacy = surr_dir / "surrogate"
+    if legacy.exists():
+        return legacy
+
+    # Provide a helpful error message with only relevant surrogate files
+    if surr_dir.exists():
+        available = [
+            p.name for p in surr_dir.iterdir()
+            if p.suffix in (".pt", ".pkl") and p.name.startswith("surrogate_")
+        ]
+    else:
+        available = []
+    raise ValueError(
+        f"No Phase-2 surrogate found with input dimension {d_expected} "
+        f"in '{surr_dir}'. "
+        f"Expected file pattern: surrogate_*_dim{d_expected}.(pt|pkl). "
+        f"Available surrogate files: {available}. "
+        "Re-run Phase 2 with the current configuration to generate a "
+        "matching surrogate."
+    )
