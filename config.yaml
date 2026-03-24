@@ -1,0 +1,129 @@
+# PI-DimRe4RFs-FieldReducer-v2 Default Configuration
+
+# -----------------------------------------------------------
+# Spatial discretization (shared by all fields)
+# -----------------------------------------------------------
+grid:
+  n_nodes_x: 20        # number of nodes in x direction
+  n_nodes_z: 10        # number of nodes in z direction
+  lx: 1.0              # domain length in x
+  lz: 0.5              # domain length in z
+
+# -----------------------------------------------------------
+# Random field definitions — all use fixed 2D DCT-II basis
+# -----------------------------------------------------------
+random_fields:
+  E:
+    n_terms: 5                    # 0 = homogeneous scalar, d > 0 = d-dim field
+    basis: "dct"                  # always DCT; kept for clarity
+    seed: 42
+    covariance: "matern"
+    nu_sampling: true             # sample nu per realisation
+    nu_range: [0.5, 2.5]
+    nu_ref: 1.5                   # reference nu for basis variance
+    length_scale_sampling: true
+    length_scale_range: [0.1, 0.5]
+    length_scale_ref: 0.3
+    logE_std: 1.0                 # std of log(E)
+    E_ref: 10.0e6                 # reference Young's modulus [Pa]
+    force_identity_reduction: false
+
+  k_h:
+    n_terms: 0                    # homogeneous: single scalar
+    basis: "dct"
+    seed: 43
+    covariance: "matern"
+    nu_sampling: false
+    nu_ref: 1.5
+    length_scale_sampling: false
+    length_scale_ref: 0.3
+    k_range: [1.0e-13, 1.0e-10]  # [min, max] permeability [m^2]
+    force_identity_reduction: false
+
+  k_v:
+    n_terms: 2                    # 2-dimensional random field
+    basis: "dct"
+    seed: 44
+    covariance: "matern"
+    nu_sampling: true
+    nu_range: [0.5, 2.5]
+    nu_ref: 1.5
+    length_scale_sampling: true
+    length_scale_range: [0.1, 0.5]
+    length_scale_ref: 0.3
+    k_range: [1.0e-13, 1.0e-10]
+    force_identity_reduction: false
+
+# -----------------------------------------------------------
+# Biot solver settings
+# -----------------------------------------------------------
+solver:
+  type: "1d"              # "1d" or "2d"
+  mode: "steady"          # "steady" or "transient"
+  nu_biot: 0.3            # Poisson's ratio
+  fluid_viscosity: 1.0e-3 # [Pa·s]
+  fluid_compressibility: 4.5e-10  # [1/Pa]
+  load: 1.0e4             # applied surface load [Pa]
+  transient:
+    dt: 0.01
+    n_steps: 100
+
+# -----------------------------------------------------------
+# Phase 1: dataset generation
+# -----------------------------------------------------------
+phase1:
+  n_samples: 200
+  val_fraction: 0.2
+  output_dir: "data"
+
+# -----------------------------------------------------------
+# Phase 2: LUT and surrogate training
+# -----------------------------------------------------------
+phase2:
+  surrogate_type: "nn"        # "nn" or "pce"
+  output_repr: "direct"       # "direct" | "dct" | "poly" | "bspline"
+  n_output_modes: 10          # used for dct/poly/bspline representations
+  training_signal: "data"     # "data" | "physics" | "hybrid"
+  hybrid_alpha: 0.5           # fraction of physics loss (hybrid mode)
+  output_dir: "models/phase2_surrogate"
+
+  nn:
+    hidden_dims: [128, 128, 64]
+    epochs: 500
+    lr: 1.0e-3
+    batch_size: 32
+    patience: 50             # early stopping patience
+
+  pce:
+    degree: 3
+
+collocation_phase2:
+  n_points: 20
+
+# -----------------------------------------------------------
+# Phase 3: dimension reducer training
+# -----------------------------------------------------------
+phase3:
+  reducer_type: "nn"          # "nn"
+  training_signal: "surrogate"  # "surrogate" | "physics" | "hybrid"
+  hybrid_alpha: 0.5
+  output_dir: "models/phase3_reducer"
+  surrogate_dir: "models/phase2_surrogate"   # Phase-2 model to load
+
+  nn:
+    hidden_dims: [256, 128, 64]
+    epochs: 500
+    lr: 1.0e-3
+    batch_size: 32
+    patience: 50
+
+collocation_phase3:
+  n_points: 5
+
+# -----------------------------------------------------------
+# Phase 4: validation
+# -----------------------------------------------------------
+phase4:
+  n_test_samples: 50
+  output_dir: "results"
+  use_physics_for_plots: false   # bypass surrogate for ground-truth plots
