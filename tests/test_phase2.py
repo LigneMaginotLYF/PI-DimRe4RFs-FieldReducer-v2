@@ -31,6 +31,35 @@ class TestPhase2Surrogate:
         assert (out_dir / "responses.npy").exists()
         assert (out_dir / "config.json").exists()
 
+    def test_dimension_stamped_filename(self, tiny_cfg):
+        """Phase 2 surrogate must be saved with dimension-stamped filename."""
+        from src.config_manager import ConfigManager
+        from src.phase2_surrogate import Phase2Surrogate
+        from src.field_manager import FieldManager
+        from src.forward_solver import BiotSolver
+
+        import copy
+        cfg = copy.deepcopy(tiny_cfg)
+        cfg["phase2"]["output_dir"] = "/tmp/test_p2_dimstamp"
+        cfg["phase2"]["surrogate_type"] = "nn"
+
+        cm = ConfigManager(overrides=cfg)
+        fm = FieldManager(cfg)
+        solver = BiotSolver(cfg)
+        X, fields, _ = fm.generate_dataset(10)
+        Y = solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+
+        p2 = Phase2Surrogate(cm)
+        p2.run(X, Y)
+
+        out_dir = Path(cfg["phase2"]["output_dir"])
+        d_total = fm.total_input_dim  # 3+1+2 = 6 for tiny_cfg
+        expected_file = out_dir / f"surrogate_nn_dim{d_total}.pt"
+        assert expected_file.exists(), (
+            f"Dimension-stamped surrogate file not found: {expected_file}. "
+            f"Files in dir: {list(out_dir.iterdir())}"
+        )
+
     def test_surrogate_predict_shape(self, tiny_cfg):
         from src.config_manager import ConfigManager
         from src.phase2_surrogate import Phase2Surrogate
@@ -92,3 +121,32 @@ class TestPhase2Surrogate:
         surrogate = p2.run(X, Y)
         pred = surrogate.predict(X[:3])
         assert pred.shape == (3, cfg["grid"]["n_nodes_x"])
+
+    def test_pce_dimension_stamped_filename(self, tiny_cfg):
+        """PCE surrogate must also be saved with dimension-stamped filename."""
+        from src.config_manager import ConfigManager
+        from src.phase2_surrogate import Phase2Surrogate
+        from src.field_manager import FieldManager
+        from src.forward_solver import BiotSolver
+
+        import copy
+        cfg = copy.deepcopy(tiny_cfg)
+        cfg["phase2"]["surrogate_type"] = "pce"
+        cfg["phase2"]["output_dir"] = "/tmp/test_p2_pce_dimstamp"
+
+        cm = ConfigManager(overrides=cfg)
+        fm = FieldManager(cfg)
+        solver = BiotSolver(cfg)
+        X, fields, _ = fm.generate_dataset(10)
+        Y = solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+
+        p2 = Phase2Surrogate(cm)
+        p2.run(X, Y)
+
+        out_dir = Path(cfg["phase2"]["output_dir"])
+        d_total = fm.total_input_dim
+        expected_file = out_dir / f"surrogate_pce_dim{d_total}.pkl"
+        assert expected_file.exists(), (
+            f"Dimension-stamped PCE surrogate file not found: {expected_file}. "
+            f"Files in dir: {list(out_dir.iterdir())}"
+        )

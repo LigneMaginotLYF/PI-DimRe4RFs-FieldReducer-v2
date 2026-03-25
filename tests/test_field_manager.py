@@ -71,12 +71,48 @@ class TestFieldConfig:
         fc = FieldConfig(name="E", n_terms=5)
         assert fc.effective_dim == 5
 
-    def test_from_dict(self):
+    def test_from_dict_legacy_format(self):
+        """Legacy keys (E_ref, logE_std, k_range) are still accepted."""
         d = {"n_terms": 3, "seed": 99, "nu_ref": 2.0, "E_ref": 5e6, "logE_std": 0.5}
         fc = FieldConfig.from_dict("E", d)
         assert fc.n_terms == 3
         assert fc.seed == 99
         assert fc.E_ref == 5e6
+        assert fc.logE_std == 0.5
+
+    def test_from_dict_unified_format(self):
+        """New unified keys (mean, range, fluctuation_std) are accepted."""
+        d = {
+            "n_terms": 4,
+            "seed": 7,
+            "mean": 8e6,
+            "range": [2e6, 25e6],
+            "fluctuation_std": 0.8,
+        }
+        fc = FieldConfig.from_dict("E", d)
+        assert fc.n_terms == 4
+        assert fc.E_ref == 8e6         # mean → E_ref
+        assert fc.logE_std == 0.8      # fluctuation_std → logE_std
+        assert fc.k_range == (2e6, 25e6)  # range → k_range (stored for display)
+
+    def test_unified_keys_take_precedence(self):
+        """When both old and new keys are present, unified keys take precedence."""
+        d = {
+            "n_terms": 2,
+            "E_ref": 1e6,      # legacy (should be overridden)
+            "mean": 5e6,       # unified (should win)
+            "logE_std": 0.3,   # legacy
+            "fluctuation_std": 0.9,  # unified (should win)
+        }
+        fc = FieldConfig.from_dict("E", d)
+        assert fc.E_ref == 5e6
+        assert fc.logE_std == 0.9
+
+    def test_k_field_range_alias(self):
+        """'range' key is stored as k_range for k_h/k_v fields."""
+        d = {"n_terms": 0, "range": [1e-14, 5e-11], "fluctuation_std": 0.4}
+        fc = FieldConfig.from_dict("k_h", d)
+        assert fc.k_range == (1e-14, 5e-11)
 
 
 class TestFieldManager:

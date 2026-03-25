@@ -12,20 +12,31 @@ grid:
 # -----------------------------------------------------------
 # Random field definitions — all use fixed 2D DCT-II basis
 # -----------------------------------------------------------
+# All three fields share the same parameter structure.
+# Dimensionality is controlled by n_terms:
+#   n_terms = 0  →  homogeneous scalar field (single parameter)
+#   n_terms > 0  →  spatial random field with n_terms DCT modes
+#
+# Unified parameter names (preferred):
+#   mean           — reference / mean physical value
+#   range          — [min, max] physical range for denormalisation
+#   fluctuation_std — amplitude of fluctuations (log-space for E,
+#                    scaled log-space for k fields)
 random_fields:
   E:
     n_terms: 5                    # 0 = homogeneous scalar, d > 0 = d-dim field
-    basis: "dct"                  # always DCT; kept for clarity
+    basis: "dct"                  # always DCT; kept for documentation
     seed: 42
     covariance: "matern"
     nu_sampling: true             # sample nu per realisation
     nu_range: [0.5, 2.5]
-    nu_ref: 1.5                   # reference nu for basis variance
+    nu_ref: 1.5                   # reference nu (used when nu_sampling=false)
     length_scale_sampling: true
     length_scale_range: [0.1, 0.5]
     length_scale_ref: 0.3
-    logE_std: 1.0                 # std of log(E)
-    E_ref: 10.0e6                 # reference Young's modulus [Pa]
+    mean: 10.0e6                  # reference Young's modulus [Pa]
+    range: [5.0e6, 20.0e6]        # physical range [min, max] [Pa]
+    fluctuation_std: 1.0          # std of log(E/mean)
     force_identity_reduction: false
 
   k_h:
@@ -37,7 +48,9 @@ random_fields:
     nu_ref: 1.5
     length_scale_sampling: false
     length_scale_ref: 0.3
-    k_range: [1.0e-13, 1.0e-10]  # [min, max] permeability [m^2]
+    mean: 1.0e-12                 # reference permeability [m²]
+    range: [1.0e-13, 1.0e-10]    # [min, max] permeability [m²]
+    fluctuation_std: 0.5          # amplitude of log-space fluctuations
     force_identity_reduction: false
 
   k_v:
@@ -51,7 +64,9 @@ random_fields:
     length_scale_sampling: true
     length_scale_range: [0.1, 0.5]
     length_scale_ref: 0.3
-    k_range: [1.0e-13, 1.0e-10]
+    mean: 1.0e-12                 # reference permeability [m²]
+    range: [1.0e-13, 1.0e-10]    # [min, max] permeability [m²]
+    fluctuation_std: 0.5
     force_identity_reduction: false
 
 # -----------------------------------------------------------
@@ -79,6 +94,10 @@ phase1:
 # -----------------------------------------------------------
 # Phase 2: LUT and surrogate training
 # -----------------------------------------------------------
+# The surrogate is saved with a dimension-stamped filename:
+#   surrogate_{type}_dim{d_total}.pt   (NN)
+#   surrogate_{type}_dim{d_total}.pkl  (PCE)
+# where d_total = sum(max(n_terms, 1) for each field).
 phase2:
   surrogate_type: "nn"        # "nn" or "pce"
   output_repr: "direct"       # "direct" | "dct" | "poly" | "bspline"
@@ -103,12 +122,16 @@ collocation_phase2:
 # -----------------------------------------------------------
 # Phase 3: dimension reducer training
 # -----------------------------------------------------------
+# Phase 3 loads the Phase-2 surrogate by searching for a file
+# matching  surrogate_*_dim{d_total}.(pt|pkl)  in surrogate_dir.
+# A ValueError is raised if no matching file is found or if the
+# surrogate's input dimension does not match d_total.
 phase3:
   reducer_type: "nn"          # "nn"
   training_signal: "surrogate"  # "surrogate" | "physics" | "hybrid"
   hybrid_alpha: 0.5
   output_dir: "models/phase3_reducer"
-  surrogate_dir: "models/phase2_surrogate"   # Phase-2 model to load
+  surrogate_dir: "models/phase2_surrogate"   # Phase-2 model directory to search
 
   nn:
     hidden_dims: [256, 128, 64]

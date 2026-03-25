@@ -294,9 +294,15 @@ class NNSurrogate(BaseSurrogate):
         return self._reconstruct_output(raw)
 
     def save(self, path: str | Path) -> None:
+        """Save the surrogate model.
+
+        If *path* ends with ``.pt`` the entire model (weights + metadata +
+        normalisation arrays) is saved as a single ``torch.save`` bundle so
+        that the file can be identified by its dimension-stamped name
+        (e.g. ``surrogate_nn_dim15.pt``).  Otherwise the legacy directory
+        format is used for backward compatibility.
+        """
         path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-        torch.save(self._model.state_dict(), path / "model.pt")
         meta = {
             "input_dim": self.input_dim,
             "n_nodes_x": self.n_nodes_x,
@@ -308,40 +314,83 @@ class NNSurrogate(BaseSurrogate):
             "batch_size": self.batch_size,
             "patience": self.patience,
         }
-        with open(path / "meta.json", "w") as f:
-            json.dump(meta, f)
-        np.save(path / "X_mean.npy", self._X_mean)
-        np.save(path / "X_std.npy", self._X_std)
-        np.save(path / "Y_mean.npy", self._Y_mean)
-        np.save(path / "Y_std.npy", self._Y_std)
+        if path.suffix == ".pt":
+            # Single-file bundle (dimension-stamped format)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            bundle = {
+                "meta": meta,
+                "state_dict": self._model.state_dict(),
+                "X_mean": self._X_mean,
+                "X_std": self._X_std,
+                "Y_mean": self._Y_mean,
+                "Y_std": self._Y_std,
+            }
+            torch.save(bundle, path)
+        else:
+            # Legacy directory format
+            path.mkdir(parents=True, exist_ok=True)
+            torch.save(self._model.state_dict(), path / "model.pt")
+            with open(path / "meta.json", "w") as f:
+                json.dump(meta, f)
+            np.save(path / "X_mean.npy", self._X_mean)
+            np.save(path / "X_std.npy", self._X_std)
+            np.save(path / "Y_mean.npy", self._Y_mean)
+            np.save(path / "Y_std.npy", self._Y_std)
 
     @classmethod
     def load(cls, path: str | Path) -> "NNSurrogate":
         path = Path(path)
-        with open(path / "meta.json") as f:
-            meta = json.load(f)
-        obj = cls(
-            input_dim=meta["input_dim"],
-            n_nodes_x=meta["n_nodes_x"],
-            output_repr=meta["output_repr"],
-            n_output_modes=meta["n_output_modes"],
-            hidden_dims=meta["hidden_dims"],
-            epochs=meta["epochs"],
-            lr=meta["lr"],
-            batch_size=meta["batch_size"],
-            patience=meta["patience"],
-        )
-        obj._model = _ResNet(
-            obj.input_dim, obj.output_dim, obj.hidden_dims
-        ).to(obj.device)
-        state = torch.load(path / "model.pt", map_location=obj.device, weights_only=True)
-        obj._model.load_state_dict(state)
-        obj._model.eval()
-        obj._X_mean = np.load(path / "X_mean.npy")
-        obj._X_std = np.load(path / "X_std.npy")
-        obj._Y_mean = np.load(path / "Y_mean.npy")
-        obj._Y_std = np.load(path / "Y_std.npy")
-        return obj
+        if path.suffix == ".pt":
+            # Single-file bundle (dimension-stamped format)
+            bundle = torch.load(path, map_location="cpu", weights_only=False)
+            meta = bundle["meta"]
+            obj = cls(
+                input_dim=meta["input_dim"],
+                n_nodes_x=meta["n_nodes_x"],
+                output_repr=meta["output_repr"],
+                n_output_modes=meta["n_output_modes"],
+                hidden_dims=meta["hidden_dims"],
+                epochs=meta["epochs"],
+                lr=meta["lr"],
+                batch_size=meta["batch_size"],
+                patience=meta["patience"],
+            )
+            obj._model = _ResNet(
+                obj.input_dim, obj.output_dim, obj.hidden_dims
+            ).to(obj.device)
+            obj._model.load_state_dict(bundle["state_dict"])
+            obj._model.eval()
+            obj._X_mean = bundle["X_mean"]
+            obj._X_std = bundle["X_std"]
+            obj._Y_mean = bundle["Y_mean"]
+            obj._Y_std = bundle["Y_std"]
+            return obj
+        else:
+            # Legacy directory format
+            with open(path / "meta.json") as f:
+                meta = json.load(f)
+            obj = cls(
+                input_dim=meta["input_dim"],
+                n_nodes_x=meta["n_nodes_x"],
+                output_repr=meta["output_repr"],
+                n_output_modes=meta["n_output_modes"],
+                hidden_dims=meta["hidden_dims"],
+                epochs=meta["epochs"],
+                lr=meta["lr"],
+                batch_size=meta["batch_size"],
+                patience=meta["patience"],
+            )
+            obj._model = _ResNet(
+                obj.input_dim, obj.output_dim, obj.hidden_dims
+            ).to(obj.device)
+            state = torch.load(path / "model.pt", map_location=obj.device, weights_only=True)
+            obj._model.load_state_dict(state)
+            obj._model.eval()
+            obj._X_mean = np.load(path / "X_mean.npy")
+            obj._X_std = np.load(path / "X_std.npy")
+            obj._Y_mean = np.load(path / "Y_mean.npy")
+            obj._Y_std = np.load(path / "Y_std.npy")
+            return obj
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +483,14 @@ class PCESurrogate(BaseSurrogate):
         return self._reconstruct_output(raw)
 
     def save(self, path: str | Path) -> None:
+        """Save the PCE surrogate.
+
+        If *path* ends with ``.pkl`` the data is saved directly to that file
+        (dimension-stamped format, e.g. ``surrogate_pce_dim15.pkl``).
+        Otherwise the legacy directory format is used (saves ``pce.pkl``
+        inside the given directory).
+        """
         path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
         data = {
             "coeffs": self._coeffs,
             "X_mean": self._X_mean,
@@ -448,13 +503,27 @@ class PCESurrogate(BaseSurrogate):
                 "degree": self.degree,
             },
         }
-        with open(path / "pce.pkl", "wb") as f:
-            pickle.dump(data, f)
+        if path.suffix == ".pkl":
+            # Single-file (dimension-stamped) format
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "wb") as f:
+                pickle.dump(data, f)
+        else:
+            # Legacy directory format
+            path.mkdir(parents=True, exist_ok=True)
+            with open(path / "pce.pkl", "wb") as f:
+                pickle.dump(data, f)
 
     @classmethod
     def load(cls, path: str | Path) -> "PCESurrogate":
         path = Path(path)
-        with open(path / "pce.pkl", "rb") as f:
+        if path.suffix == ".pkl":
+            # Single-file (dimension-stamped) format
+            pkl_path = path
+        else:
+            # Legacy directory format
+            pkl_path = path / "pce.pkl"
+        with open(pkl_path, "rb") as f:
             data = pickle.load(f)
         meta = data["meta"]
         obj = cls(
@@ -511,14 +580,30 @@ def build_surrogate(
 
 
 def load_surrogate(path: str | Path) -> BaseSurrogate:
-    """Auto-detect and load a saved surrogate model."""
+    """Auto-detect and load a saved surrogate model.
+
+    Handles three path forms:
+    1. A single ``.pt`` file  → :class:`NNSurrogate` (dimension-stamped format)
+    2. A single ``.pkl`` file → :class:`PCESurrogate` (dimension-stamped format)
+    3. A directory           → legacy format (looks for ``model.pt`` or ``pce.pkl`` inside)
+    """
     path = Path(path)
-    if (path / "model.pt").exists():
+    if path.suffix == ".pt":
         return NNSurrogate.load(path)
-    elif (path / "pce.pkl").exists():
+    elif path.suffix == ".pkl":
         return PCESurrogate.load(path)
+    elif path.is_dir():
+        if (path / "model.pt").exists():
+            return NNSurrogate.load(path)
+        elif (path / "pce.pkl").exists():
+            return PCESurrogate.load(path)
+        else:
+            raise FileNotFoundError(
+                f"No surrogate model found in directory {path}. "
+                "Expected 'model.pt' (NN) or 'pce.pkl' (PCE)."
+            )
     else:
         raise FileNotFoundError(
-            f"No surrogate model found at {path}. "
-            "Expected 'model.pt' (NN) or 'pce.pkl' (PCE)."
+            f"Surrogate path not found: {path}. "
+            "Expected a '.pt' file, '.pkl' file, or a directory."
         )

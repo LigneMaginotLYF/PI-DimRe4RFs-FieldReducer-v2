@@ -81,6 +81,32 @@ class FieldConfig:
 
     @classmethod
     def from_dict(cls, name: str, d: Dict[str, Any]) -> "FieldConfig":
+        """Construct a FieldConfig from a dict.
+
+        Supports both the unified format (``mean``, ``range``,
+        ``fluctuation_std``) and the legacy format (``E_ref``, ``logE_std``,
+        ``k_range``).  Unified keys take precedence over legacy keys when
+        both are present.
+        """
+        # --- Unified → legacy key resolution ---
+        # E_ref / mean
+        if "mean" in d:
+            E_ref = d["mean"]
+        else:
+            E_ref = d.get("E_ref", 10.0e6)
+
+        # logE_std / fluctuation_std
+        if "fluctuation_std" in d:
+            logE_std = d["fluctuation_std"]
+        else:
+            logE_std = d.get("logE_std", 1.0)
+
+        # k_range / range
+        if "range" in d:
+            k_range = tuple(d["range"])
+        else:
+            k_range = tuple(d.get("k_range", [1.0e-13, 1.0e-10]))
+
         return cls(
             name=name,
             n_terms=d.get("n_terms", 0),
@@ -92,9 +118,9 @@ class FieldConfig:
             length_scale_sampling=d.get("length_scale_sampling", False),
             length_scale_range=tuple(d.get("length_scale_range", [0.1, 0.5])),
             force_identity_reduction=d.get("force_identity_reduction", False),
-            logE_std=d.get("logE_std", 1.0),
-            E_ref=d.get("E_ref", 10.0e6),
-            k_range=tuple(d.get("k_range", [1.0e-13, 1.0e-10])),
+            logE_std=logE_std,
+            E_ref=E_ref,
+            k_range=k_range,
         )
 
 
