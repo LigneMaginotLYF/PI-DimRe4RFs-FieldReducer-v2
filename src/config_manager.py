@@ -110,6 +110,10 @@ _DEFAULTS: Dict[str, Any] = {
             "patience": 50,
         },
         "pce": {"degree": 3},
+        "evaluation": {
+            "test_fraction": 0.2,
+            "n_plot_samples": 5,
+        },
     },
     "collocation_phase2": {"n_points": 20},
     "phase3": {
@@ -118,12 +122,17 @@ _DEFAULTS: Dict[str, Any] = {
         "hybrid_alpha": 0.5,
         "output_dir": "models/phase3_reducer",
         "surrogate_dir": "models/phase2_surrogate",
+        "load_phase2_model": None,
         "nn": {
             "hidden_dims": [256, 128, 64],
             "epochs": 500,
             "lr": 1.0e-3,
             "batch_size": 32,
             "patience": 50,
+        },
+        "evaluation": {
+            "test_fraction": 0.2,
+            "n_plot_samples": 5,
         },
     },
     "collocation_phase3": {"n_points": 5},
