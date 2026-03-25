@@ -116,6 +116,10 @@ phase2:
   pce:
     degree: 3
 
+  evaluation:
+    test_fraction: 0.2       # fraction of data used for evaluation
+    n_plot_samples: 5        # number of samples shown in comparison plots
+
 collocation_phase2:
   n_points: 20
 
@@ -132,6 +136,7 @@ phase3:
   hybrid_alpha: 0.5
   output_dir: "models/phase3_reducer"
   surrogate_dir: "models/phase2_surrogate"   # Phase-2 model directory to search
+  load_phase2_model: null     # Path to specific Phase-2 model file, or null to auto-detect
 
   nn:
     hidden_dims: [256, 128, 64]
@@ -139,6 +144,10 @@ phase3:
     lr: 1.0e-3
     batch_size: 32
     patience: 50
+
+  evaluation:
+    test_fraction: 0.2       # fraction of data used for evaluation
+    n_plot_samples: 5        # number of samples shown in comparison plots
 
 collocation_phase3:
   n_points: 5
