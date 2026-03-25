@@ -135,19 +135,34 @@ class FieldManager:
     ----------
     cfg : dict
         Full configuration dict (from ConfigManager.cfg).
+    fields_override : dict, optional
+        If provided, use this dict (mapping field name → field config dict)
+        instead of ``cfg["random_fields"]``.  Allows per-phase field
+        configurations (e.g. ``phase2.reduced_fields`` or
+        ``phase3.full_fields``) without modifying the global config.
+    lx : float, optional
+        Physical domain length in x [m].  Overrides ``cfg["grid"]["lx"]``.
+    lz : float, optional
+        Physical domain length in z [m].  Overrides ``cfg["grid"]["lz"]``.
     """
 
     FIELD_NAMES = ("E", "k_h", "k_v")
 
-    def __init__(self, cfg: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        cfg: Dict[str, Any],
+        fields_override: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self._cfg = cfg
         grid = cfg["grid"]
         self.n_nodes_x: int = grid["n_nodes_x"]
         self.n_nodes_z: int = grid["n_nodes_z"]
         self.n_nodes: int = self.n_nodes_x * self.n_nodes_z
+        self.lx: float = float(grid.get("lx", 1.0))
+        self.lz: float = float(grid.get("lz", 0.5))
 
-        # Build per-field configs
-        rf_cfg = cfg["random_fields"]
+        # Build per-field configs — allow phase-specific override
+        rf_cfg = fields_override if fields_override is not None else cfg["random_fields"]
         self.field_configs: Dict[str, FieldConfig] = {
             name: FieldConfig.from_dict(name, rf_cfg[name])
             for name in self.FIELD_NAMES

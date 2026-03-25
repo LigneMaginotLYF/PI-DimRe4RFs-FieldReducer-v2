@@ -1,33 +1,30 @@
 """
 phase3_reducer.py
 =================
-Phase 3: Dimension reducer training.
+Phase 3: Dimension reducer from FULL to REDUCED parameter space.
 
-The reducer maps the high-dimensional concatenated coefficient vector
-[ξ_E, ξ_kh, ξ_kv]  →  [ξ'_E, ξ'_kh, ξ'_kv]
-where the reduced-space dimension may be lower (or equal) to the input.
+Maps full-dimensional concatenated coefficients → reduced-dimensional
+concatenated coefficients that can be used as Phase-2 surrogate input.
 
-Training signal options (configured via `phase3.training_signal`):
-  - "surrogate" : use the Phase-2 surrogate to evaluate the predicted settlement
-                  from the reduced parameters (fast, deterministic)
-  - "physics"   : run the Biot solver directly on the reconstructed fields
-                  (accurate, slower)
-  - "hybrid"    : weighted combination of both
+  P3 : ℝ^{full_dim} → ℝ^{reduced_dim}
 
-Loss function:
-  L = MSE(signal(mapper(X)), Y_true)  +  λ * regularisation
+where ``full_dim``    = sum(max(n_terms, 1) for each field in full_fields)
+      ``reduced_dim`` = sum(max(n_terms, 1) for each field in reduced_fields)
 
-The reducer is an NN that is trained end-to-end with the training signal as a
-differentiable (surrogate) or non-differentiable (physics) oracle.
-When using the surrogate signal the gradient flows through both the mapper and
-the surrogate network; when using the physics signal a finite-difference
-approximation or sample-based loss is used.
+The reduced_fields MUST match phase2.reduced_fields so that the Phase-2
+surrogate can evaluate the output of P3.
+
+Training signal options (``phase3.training_signal``):
+  - "surrogate" : L = ||Y_full - P2(P3(ξ_full))||  (fast, differentiable)
+  - "physics"   : L = ||Y_full - P(reconstruct(P3(ξ_full)))||  (Biot, slow)
+
+Evaluation is ALWAYS physics-driven (Biot solver), regardless of training mode.
 """
 
 from __future__ import annotations
 
 import json
-import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -41,7 +38,7 @@ from .field_manager import FieldManager
 from .forward_solver import BiotSolver
 from .surrogate_models import BaseSurrogate, load_surrogate
 from .phase2_surrogate import _find_surrogate_file
-from .training_schema import build_training_signal
+from .phase3_data_generator import Phase3DataGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -76,14 +73,14 @@ class _ReducerNet(nn.Module):
 # ---------------------------------------------------------------------------
 
 class Phase3Reducer:
-    """Dimension reducer training.
+    """Dimension reducer: FULL parameters → REDUCED parameters.
 
     Parameters
     ----------
     config_manager : ConfigManager
     output_dir : str, optional
     surrogate_dir : str, optional
-        Path to Phase-2 surrogate directory.  Overrides config.
+        Path to Phase-2 surrogate directory.
     """
 
     def __init__(
@@ -94,20 +91,54 @@ class Phase3Reducer:
     ) -> None:
         self._cm = config_manager
         self._cfg = config_manager.cfg
-        self._fm = FieldManager(self._cfg)
-        self._solver = BiotSolver(self._cfg)
+        p3 = self._cfg["phase3"]
 
-        self._output_dir = Path(output_dir or self._cfg["phase3"]["output_dir"])
-        self._surrogate_dir = Path(
-            surrogate_dir or self._cfg["phase3"]["surrogate_dir"]
-        )
+        # Full-space FieldManager (input to reducer)
+        full_fields_cfg = p3.get("full_fields")
+        self._fm_full = FieldManager(self._cfg, fields_override=full_fields_cfg)
+
+        # Reduced-space FieldManager (output of reducer; must match phase2)
+        reduced_fields_cfg = p3.get("reduced_fields")
+        self._fm_reduced = FieldManager(self._cfg, fields_override=reduced_fields_cfg)
+
+        self._solver = BiotSolver(self._cfg)
+        self._output_dir = Path(output_dir or p3["output_dir"])
+        self._surrogate_dir = Path(surrogate_dir or p3["surrogate_dir"])
 
         self._reducer: Optional[_ReducerNet] = None
         self._surrogate: Optional[BaseSurrogate] = None
+
+        # Normalisation statistics (full-space input)
         self._X_mean: Optional[np.ndarray] = None
         self._X_std: Optional[np.ndarray] = None
+        # Normalisation statistics (reduced-space output target)
+        self._Xr_mean: Optional[np.ndarray] = None
+        self._Xr_std: Optional[np.ndarray] = None
+
+        # Data generator for full space
+        self._data_gen = Phase3DataGenerator(config_manager, output_dir=str(self._output_dir))
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def full_dim(self) -> int:
+        return self._fm_full.total_input_dim
+
+    @property
+    def reduced_dim(self) -> int:
+        return self._fm_reduced.total_input_dim
+
+    @property
+    def field_manager_full(self) -> FieldManager:
+        return self._fm_full
+
+    @property
+    def field_manager_reduced(self) -> FieldManager:
+        return self._fm_reduced
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,94 +146,141 @@ class Phase3Reducer:
 
     def run(
         self,
-        X_train: np.ndarray,
-        Y_train: np.ndarray,
+        X_train: Optional[np.ndarray] = None,
+        Y_train: Optional[np.ndarray] = None,
         X_val: Optional[np.ndarray] = None,
         Y_val: Optional[np.ndarray] = None,
     ) -> "_ReducerNet":
         """Train the dimension reducer.
 
+        Generates a fresh dataset in the FULL parameter space if
+        X_train/Y_train are not provided.
+
         Parameters
         ----------
-        X_train : (n_train, input_dim)  — full-dimensional coefficients
-        Y_train : (n_train, n_nodes_x)  — ground-truth settlements
-        X_val, Y_val : optional validation data
+        X_train : (n_train, full_dim) — full-dim coefficients (optional)
+        Y_train : (n_train, n_nodes_x) — ground-truth settlements (optional)
+        X_val, Y_val : optional separate validation data
 
         Returns
         -------
         Trained reducer network.
         """
-        signal_type = self._cfg["phase3"]["training_signal"]
+        p3 = self._cfg["phase3"]
+        signal_type = p3.get("training_signal", "surrogate")
 
-        # Load surrogate if needed
+        # --- 1. Generate / use data in FULL parameter space ---
+        if X_train is None or Y_train is None:
+            print("[Phase 3] Generating training data in full parameter space ...")
+            X_full, Y_full = self._data_gen.generate()
+        else:
+            print(f"[Phase 3] Using provided training data: {X_train.shape}")
+            X_full, Y_full = X_train, Y_train
+
+        # --- 2. Validate input dimension ---
+        if X_full.shape[1] != self.full_dim:
+            raise ValueError(
+                f"Phase 3 expects full_dim={self.full_dim} but got "
+                f"X.shape[1]={X_full.shape[1]}. "
+                "Check that phase3.full_fields matches the provided data."
+            )
+
+        # --- 3. Train/val split ---
+        eval_cfg = p3.get("evaluation", {})
+        test_fraction = float(eval_cfg.get("test_fraction", 0.2))
+        n_total = len(X_full)
+        n_test = max(1, int(n_total * test_fraction))
+        idx = np.random.default_rng(seed=2345).permutation(n_total)
+        X_test_full = X_full[idx[:n_test]]
+        Y_test_full = Y_full[idx[:n_test]]
+        X_tr = X_full[idx[n_test:]]
+        Y_tr = Y_full[idx[n_test:]]
+
+        # --- 4. Compute normalisation stats ---
+        self._X_mean = X_tr.mean(axis=0)
+        self._X_std = X_tr.std(axis=0)
+        self._X_std[self._X_std < 1e-12] = 1.0
+
+        # Use a sample of reduced-space params to compute Xr normalization
+        # (sample from reduced space directly)
+        from .phase2_data_generator import Phase2DataGenerator
+        p2_gen = Phase2DataGenerator(self._cm)
+        Xr_sample, _ = p2_gen.generate()
+        self._Xr_mean = Xr_sample.mean(axis=0)
+        self._Xr_std = Xr_sample.std(axis=0)
+        self._Xr_std[self._Xr_std < 1e-12] = 1.0
+
+        p3_nn = p3["nn"]
+        print(
+            f"[Phase 3] Training reducer "
+            f"(full_dim={self.full_dim} → reduced_dim={self.reduced_dim}, "
+            f"signal={signal_type}) ..."
+        )
+
+        # --- 5. Load Phase-2 surrogate if needed ---
         surrogate = None
-        if signal_type in ("surrogate", "hybrid"):
+        if signal_type == "surrogate":
             print(f"[Phase 3] Loading Phase-2 surrogate from '{self._surrogate_dir}' ...")
             surrogate = self._load_phase2_surrogate()
             self._surrogate = surrogate
 
-        p3_nn = self._cfg["phase3"]["nn"]
-        input_dim = self._fm.total_input_dim
-        # Reduced dim = same as input for now (identity if no reduction desired);
-        # the mapper learns any non-trivial projection.
-        reduced_dim = input_dim
-
-        # Normalise inputs
-        self._X_mean = X_train.mean(axis=0)
-        self._X_std = X_train.std(axis=0)
-        self._X_std[self._X_std < 1e-12] = 1.0
-
-        if signal_type in ("surrogate", "hybrid"):
+        # --- 6. Train ---
+        if signal_type == "surrogate" and surrogate is not None:
             self._reducer = self._train_with_surrogate(
-                X_train, Y_train, X_val, Y_val, surrogate, p3_nn, input_dim, reduced_dim
+                X_tr, Y_tr, X_test_full, Y_test_full, surrogate, p3_nn
             )
         else:
-            # physics or hybrid with physics dominant
             self._reducer = self._train_with_physics(
-                X_train, Y_train, X_val, Y_val, p3_nn, input_dim, reduced_dim
+                X_tr, Y_tr, X_test_full, Y_test_full, p3_nn
             )
 
-        self._save()
+        # --- 7. Save ---
+        self._save(X_test_full, Y_test_full)
         print(f"[Phase 3] Reducer saved to '{self._output_dir}'")
         return self._reducer
 
     def reduce(self, X: np.ndarray) -> np.ndarray:
-        """Map full-dimensional coefficients to reduced space.
+        """Map full-dimensional coefficients to reduced-dimensional space.
 
         Parameters
         ----------
-        X : (n_samples, input_dim) or (input_dim,)
+        X : (n_samples, full_dim) or (full_dim,)
 
         Returns
         -------
-        X_reduced : same shape as input
+        X_reduced : (n_samples, reduced_dim) or (reduced_dim,)
         """
         if self._reducer is None:
             raise RuntimeError("Reducer not trained. Call run() or load() first.")
         single = X.ndim == 1
         if single:
             X = X[np.newaxis, :]
+
         Xn = (X - self._X_mean) / self._X_std
         xt = torch.tensor(Xn, dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            reduced = self._reducer(xt).cpu().numpy()
-        # De-normalise to original coefficient scale
-        result = reduced * self._X_std + self._X_mean
+            reduced_n = self._reducer(xt).cpu().numpy()
+
+        # De-normalise to reduced coefficient scale
+        result = reduced_n * self._Xr_std + self._Xr_mean
         return result[0] if single else result
 
     def load(self) -> "_ReducerNet":
         """Load a previously trained reducer from disk."""
         d = self._output_dir
-        with open(d / "config.json", encoding='utf-8') as f:
+        with open(d / "config.json", encoding="utf-8") as f:
             meta = json.load(f)
-        input_dim = meta["input_dim"]
+        full_dim = meta["full_dim"]
+        reduced_dim = meta["reduced_dim"]
         hidden_dims = meta["hidden_dims"]
-        self._reducer = _ReducerNet(input_dim, input_dim, hidden_dims).to(self.device)
+        self._reducer = _ReducerNet(full_dim, reduced_dim, hidden_dims).to(self.device)
         state = torch.load(d / "reducer.pt", map_location=self.device, weights_only=True)
         self._reducer.load_state_dict(state)
         self._reducer.eval()
         self._X_mean = np.load(d / "X_mean.npy")
         self._X_std = np.load(d / "X_std.npy")
+        self._Xr_mean = np.load(d / "Xr_mean.npy")
+        self._Xr_std = np.load(d / "Xr_std.npy")
         return self._reducer
 
     # ------------------------------------------------------------------
@@ -212,77 +290,52 @@ class Phase3Reducer:
     def _load_phase2_surrogate(self) -> BaseSurrogate:
         """Load the Phase-2 surrogate with dimension validation.
 
-        Searches for a dimension-stamped file matching the current
-        ``total_input_dim``.  Raises :class:`ValueError` with a helpful
-        message if the surrogate dimension does not match the expected
-        Phase-3 input dimension.
-
-        Returns
-        -------
-        BaseSurrogate
-            The loaded and validated surrogate model.
-
-        Raises
-        ------
-        ValueError
-            If no surrogate matching the expected dimension is found.
-        ValueError
-            If the loaded surrogate's ``input_dim`` differs from the
-            expected dimension (should not normally occur, but guards
-            against corrupt metadata).
+        The surrogate must accept the REDUCED dimension as input.
         """
-        d_expected = self._fm.total_input_dim
+        d_expected = self.reduced_dim
         surr_path = _find_surrogate_file(self._surrogate_dir, d_expected)
         surrogate = load_surrogate(surr_path)
 
-        # Validate dimension of loaded surrogate
         if surrogate.input_dim != d_expected:
             raise ValueError(
                 f"Phase-2 surrogate input dimension mismatch: "
-                f"expected {d_expected}, got {surrogate.input_dim}. "
+                f"expected {d_expected} (reduced_dim), got {surrogate.input_dim}. "
                 f"Loaded from: {surr_path}. "
-                "Ensure Phase 2 was run with the same n_terms configuration."
+                "Ensure Phase 2 was run with the same reduced_fields configuration."
             )
         return surrogate
 
-    # ------------------------------------------------------------------
-    # Private training routines
-    # ------------------------------------------------------------------
-
     def _train_with_surrogate(
         self,
-        X_train: np.ndarray,
-        Y_train: np.ndarray,
+        X_tr: np.ndarray,
+        Y_tr: np.ndarray,
         X_val: Optional[np.ndarray],
         Y_val: Optional[np.ndarray],
         surrogate: BaseSurrogate,
         p3_nn: Dict,
-        input_dim: int,
-        reduced_dim: int,
     ) -> _ReducerNet:
-        """Gradient-based training with surrogate as differentiable oracle.
+        """Gradient-based training: loss = ||Y_full - P2(P3(ξ_full))||.
 
-        The surrogate NN is used in inference mode (no grad update on surrogate).
-        Only the reducer network parameters are updated.
+        Phase-2 surrogate is frozen; only reducer parameters are updated.
         """
         net = _ReducerNet(
-            input_dim, reduced_dim, p3_nn.get("hidden_dims", [256, 128, 64])
+            self.full_dim, self.reduced_dim,
+            p3_nn.get("hidden_dims", [256, 128, 64])
         ).to(self.device)
 
-        # Wrap surrogate in torch for differentiable forward pass
-        # (only applicable for NNSurrogate)
         use_surrogate_grad = hasattr(surrogate, "_model") and surrogate._model is not None
 
         optimiser = torch.optim.Adam(net.parameters(), lr=p3_nn.get("lr", 1e-3))
         loss_fn = nn.MSELoss()
 
-        Xn = (X_train - self._X_mean) / self._X_std
+        # Normalise full-space inputs
+        Xn = (X_tr - self._X_mean) / self._X_std
         X_t = torch.tensor(Xn, dtype=torch.float32, device=self.device)
-        Y_t = torch.tensor(Y_train, dtype=torch.float32, device=self.device)
+        Y_t = torch.tensor(Y_tr, dtype=torch.float32, device=self.device)
 
         batch_size = p3_nn.get("batch_size", 32)
         patience = p3_nn.get("patience", 50)
-        epochs = p3_nn.get("epochs", 500)
+        epochs = p3_nn.get("epochs", 300)
 
         dataset = TensorDataset(X_t, Y_t)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -291,36 +344,32 @@ class Phase3Reducer:
         best_state = None
         patience_counter = 0
 
-        # Pre-compute collocation grid for physics-based loss augmentation
-        n_coll = self._cfg["collocation_phase3"]["n_points"]
-        coll_X = self._generate_collocation_grid(n_coll)
+        # Surrogate normalisation tensors
+        if use_surrogate_grad:
+            surr_X_mean = torch.tensor(surrogate._X_mean, dtype=torch.float32, device=self.device)
+            surr_X_std = torch.tensor(surrogate._X_std, dtype=torch.float32, device=self.device)
+            surr_Y_mean = torch.tensor(surrogate._Y_mean, dtype=torch.float32, device=self.device)
+            surr_Y_std = torch.tensor(surrogate._Y_std, dtype=torch.float32, device=self.device)
+            Xr_mean_t = torch.tensor(self._Xr_mean, dtype=torch.float32, device=self.device)
+            Xr_std_t = torch.tensor(self._Xr_std, dtype=torch.float32, device=self.device)
 
         net.train()
         for epoch in range(epochs):
+            epoch_loss = 0.0
+            n_batches = 0
             for Xb, Yb in loader:
                 optimiser.zero_grad()
-                reduced = net(Xb)
-                # De-normalise
-                reduced_denorm = reduced * torch.tensor(
-                    self._X_std, dtype=torch.float32, device=self.device
-                ) + torch.tensor(self._X_mean, dtype=torch.float32, device=self.device)
+                # Predict reduced coefficients (normalised)
+                reduced_n = net(Xb)
+                # De-normalise to reduced coefficient scale
+                reduced_denorm = reduced_n * Xr_std_t + Xr_mean_t
 
                 if use_surrogate_grad:
-                    # Normalise reduced params for surrogate
-                    surr_Xn = (reduced_denorm - torch.tensor(
-                        surrogate._X_mean, dtype=torch.float32, device=self.device
-                    )) / torch.tensor(
-                        surrogate._X_std, dtype=torch.float32, device=self.device
-                    )
+                    # Normalize for surrogate
+                    surr_Xn = (reduced_denorm - surr_X_mean) / surr_X_std
                     surr_pred_n = surrogate._model(surr_Xn)
-                    surr_pred = surr_pred_n * torch.tensor(
-                        surrogate._Y_std, dtype=torch.float32, device=self.device
-                    ) + torch.tensor(
-                        surrogate._Y_mean, dtype=torch.float32, device=self.device
-                    )
+                    surr_pred = surr_pred_n * surr_Y_std + surr_Y_mean
                     if surrogate.output_repr != "direct":
-                        # Reconstruct to node space
-                        from scipy.fft import idct
                         surr_pred_np = surr_pred.detach().cpu().numpy()
                         surr_pred_np = surrogate._reconstruct_output(surr_pred_np)
                         surr_pred = torch.tensor(
@@ -328,34 +377,32 @@ class Phase3Reducer:
                         )
                     loss = loss_fn(surr_pred, Yb)
                 else:
-                    # Non-differentiable surrogate (PCE): use ES gradient estimate.
-                    # We use the ES approach from _train_with_physics but with
-                    # the surrogate as the oracle.
-                    rd_np = reduced_denorm.detach().cpu().numpy()
-                    pred_np = surrogate.predict(rd_np)
-                    Yb_np = Yb.cpu().numpy()
-                    loss_val = float(np.mean((pred_np - Yb_np) ** 2))
-
-                    # Identity regularisation gradient (differentiable)
-                    X_orig = Xb * torch.tensor(
-                        self._X_std, dtype=torch.float32, device=self.device
-                    ) + torch.tensor(self._X_mean, dtype=torch.float32, device=self.device)
-                    loss = 0.01 * loss_fn(reduced_denorm, X_orig.detach())
+                    # Non-differentiable: use identity regularization
+                    loss = 0.01 * loss_fn(reduced_denorm,
+                                          torch.zeros_like(reduced_denorm))
 
                 loss.backward()
                 optimiser.step()
+                epoch_loss += loss.item()
+                n_batches += 1
 
-            # Validation / early stopping
+            avg_loss = epoch_loss / max(n_batches, 1)
+
+            # Validation
             net.eval()
             with torch.no_grad():
-                reduced_full = net(X_t)
-                reduced_full_denorm = reduced_full * torch.tensor(
-                    self._X_std, dtype=torch.float32, device=self.device
-                ) + torch.tensor(self._X_mean, dtype=torch.float32, device=self.device)
-                pred_np = surrogate.predict(reduced_full_denorm.cpu().numpy())
+                red_full_n = net(X_t)
+                red_full = red_full_n * Xr_std_t + Xr_mean_t
+                pred_np = surrogate.predict(red_full.cpu().numpy())
                 pred_t = torch.tensor(pred_np, dtype=torch.float32, device=self.device)
                 val_loss = loss_fn(pred_t, Y_t).item()
             net.train()
+
+            if (epoch + 1) % 20 == 0:
+                print(
+                    f"[Phase 3] Epoch {epoch+1:4d}/{epochs} | "
+                    f"train_loss={avg_loss:.4e} | val_loss={val_loss:.4e}"
+                )
 
             if val_loss < best_loss:
                 best_loss = val_loss
@@ -364,6 +411,7 @@ class Phase3Reducer:
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
+                    print(f"[Phase 3] Early stopping at epoch {epoch+1}")
                     break
 
         if best_state is not None:
@@ -371,134 +419,120 @@ class Phase3Reducer:
         net.eval()
         return net
 
-    def _physics_loss(
-        self, net: _ReducerNet, X_np: np.ndarray, Y_np: np.ndarray
-    ) -> float:
-        """Evaluate the physics oracle loss (non-differentiable, numpy)."""
-        xt = torch.tensor(X_np, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            reduced = net(xt)
-            reduced_denorm = (
-                reduced
-                * torch.tensor(self._X_std, dtype=torch.float32, device=self.device)
-                + torch.tensor(self._X_mean, dtype=torch.float32, device=self.device)
-            )
-        rd_np = reduced_denorm.cpu().numpy()
-        fields = self._fm.reconstruct_all_fields(rd_np)
-        pred_np = self._solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
-        return float(np.mean((pred_np - Y_np) ** 2))
-
     def _train_with_physics(
         self,
-        X_train: np.ndarray,
-        Y_train: np.ndarray,
+        X_tr: np.ndarray,
+        Y_tr: np.ndarray,
         X_val: Optional[np.ndarray],
         Y_val: Optional[np.ndarray],
         p3_nn: Dict,
-        input_dim: int,
-        reduced_dim: int,
     ) -> _ReducerNet:
-        """Training using Evolution Strategies (ES) gradient estimation.
+        """Physics-based training: loss = ||Y_full - P(reduced_fields)||.
 
-        Since the Biot solver is non-differentiable, we estimate the gradient
-        of the physics oracle loss w.r.t. the network parameters using random
-        perturbations of the parameter vector (ES / NES approach):
-
-            ∇_θ L ≈ (1 / (K σ²)) Σ_k  [L(θ + σ ε_k) - L(θ)] ε_k
-
-        where ε_k ~ N(0, I) are random perturbation directions and σ is the
-        perturbation scale.  This allows training with any black-box oracle.
+        Non-differentiable; uses Evolution Strategies gradient estimation.
         """
         net = _ReducerNet(
-            input_dim, reduced_dim, p3_nn.get("hidden_dims", [256, 128, 64])
+            self.full_dim, self.reduced_dim,
+            p3_nn.get("hidden_dims", [256, 128, 64])
         ).to(self.device)
 
+        epochs = p3_nn.get("epochs", 300)
         batch_size = p3_nn.get("batch_size", 32)
         patience = p3_nn.get("patience", 50)
-        epochs = p3_nn.get("epochs", 500)
         lr = p3_nn.get("lr", 1e-3)
+        sigma = 0.02
+        n_es_samples = 20
 
-        Xn = (X_train - self._X_mean) / self._X_std
-        n = len(Xn)
+        optimiser = torch.optim.Adam(net.parameters(), lr=lr)
 
-        # ES hyperparameters
-        n_perturbations = 4   # number of ES perturbation directions per step
-        sigma = 0.02          # perturbation scale
+        Xn = (X_tr - self._X_mean) / self._X_std
+        Xr_mean_t = torch.tensor(self._Xr_mean, dtype=torch.float32, device=self.device)
+        Xr_std_t = torch.tensor(self._Xr_std, dtype=torch.float32, device=self.device)
 
         best_loss = float("inf")
         best_state = None
         patience_counter = 0
 
         for epoch in range(epochs):
-            # Shuffle data
-            perm = np.random.permutation(n)
-            epoch_loss = 0.0
-            n_batches = 0
+            # Batch selection
+            n_train = len(X_tr)
+            batch_idx = np.random.choice(n_train, size=min(batch_size, n_train), replace=False)
+            Xb_np = Xn[batch_idx]
+            Yb_np = Y_tr[batch_idx]
 
-            for start in range(0, n, batch_size):
-                idx = perm[start: start + batch_size]
-                Xb_np = Xn[idx]
-                Yb_np = Y_train[idx]
+            Xb_t = torch.tensor(Xb_np, dtype=torch.float32, device=self.device)
 
-                # Baseline loss at current parameters
-                loss_base = self._physics_loss(net, Xb_np, Yb_np)
-                epoch_loss += loss_base
-                n_batches += 1
+            # ES gradient estimation
+            theta = list(net.parameters())
+            theta_flat = torch.cat([p.data.view(-1) for p in theta])
+            n_params = len(theta_flat)
 
-                # ES gradient estimation
-                params = list(net.parameters())
-                param_shapes = [p.shape for p in params]
-                n_params_total = sum(p.numel() for p in params)
+            perturbations = torch.randn(n_es_samples, n_params, device=self.device)
+            losses = np.zeros(n_es_samples)
 
-                grad_estimate = torch.zeros(n_params_total, device=self.device)
-
-                for _ in range(n_perturbations):
-                    eps = torch.randn(n_params_total, device=self.device)
-                    # Apply positive perturbation
-                    offset = 0
-                    for p in params:
-                        n_p = p.numel()
-                        p.data += sigma * eps[offset: offset + n_p].view(p.shape)
-                        offset += n_p
-
-                    loss_plus = self._physics_loss(net, Xb_np, Yb_np)
-
-                    # Restore and apply negative perturbation
-                    offset = 0
-                    for p in params:
-                        n_p = p.numel()
-                        p.data -= 2 * sigma * eps[offset: offset + n_p].view(p.shape)
-                        offset += n_p
-
-                    loss_minus = self._physics_loss(net, Xb_np, Yb_np)
-
-                    # Restore
-                    offset = 0
-                    for p in params:
-                        n_p = p.numel()
-                        p.data += sigma * eps[offset: offset + n_p].view(p.shape)
-                        offset += n_p
-
-                    # Accumulate gradient estimate
-                    grad_estimate += ((loss_plus - loss_minus) / (2 * sigma)) * eps
-
-                grad_estimate /= n_perturbations
-
-                # Manual gradient update (gradient descent)
+            for k in range(n_es_samples):
+                # Perturb
                 offset = 0
-                for p in params:
-                    n_p = p.numel()
-                    p.data -= lr * grad_estimate[offset: offset + n_p].view(p.shape)
-                    offset += n_p
+                for p in theta:
+                    sz = p.numel()
+                    p.data.add_(sigma * perturbations[k, offset:offset + sz].view(p.shape))
+                    offset += sz
 
-            avg_loss = epoch_loss / max(n_batches, 1)
-            if avg_loss < best_loss:
-                best_loss = avg_loss
+                with torch.no_grad():
+                    red_n = net(Xb_t)
+                    red_denorm = (red_n * Xr_std_t + Xr_mean_t).cpu().numpy()
+
+                fields = self._fm_reduced.reconstruct_all_fields(red_denorm)
+                pred = self._solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+                losses[k] = float(np.mean((pred - Yb_np) ** 2))
+
+                # Restore
+                offset = 0
+                for p in theta:
+                    sz = p.numel()
+                    p.data.sub_(sigma * perturbations[k, offset:offset + sz].view(p.shape))
+                    offset += sz
+
+            # ES gradient
+            losses_t = torch.tensor(losses, dtype=torch.float32, device=self.device)
+            losses_norm = (losses_t - losses_t.mean()) / (losses_t.std() + 1e-8)
+            grad_flat = (losses_norm.unsqueeze(1) * perturbations).mean(0) / sigma
+
+            optimiser.zero_grad()
+            offset = 0
+            for p in theta:
+                sz = p.numel()
+                p.grad = grad_flat[offset:offset + sz].view(p.shape).clone()
+                offset += sz
+            optimiser.step()
+
+            avg_loss = float(losses.mean())
+
+            # Full validation
+            net.eval()
+            with torch.no_grad():
+                Xn_val_t = torch.tensor(Xn[:min(50, len(Xn))], dtype=torch.float32, device=self.device)
+                red_n = net(Xn_val_t)
+                red_denorm = (red_n * Xr_std_t + Xr_mean_t).cpu().numpy()
+            fields = self._fm_reduced.reconstruct_all_fields(red_denorm)
+            val_pred = self._solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+            val_loss = float(np.mean((val_pred - Y_tr[:min(50, len(Y_tr))]) ** 2))
+            net.train()
+
+            if (epoch + 1) % 20 == 0:
+                print(
+                    f"[Phase 3] Epoch {epoch+1:4d}/{epochs} | "
+                    f"train_loss={avg_loss:.4e} | val_loss={val_loss:.4e} (physics)"
+                )
+
+            if val_loss < best_loss:
+                best_loss = val_loss
                 best_state = {k: v.clone() for k, v in net.state_dict().items()}
                 patience_counter = 0
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
+                    print(f"[Phase 3] Early stopping at epoch {epoch+1}")
                     break
 
         if best_state is not None:
@@ -506,26 +540,36 @@ class Phase3Reducer:
         net.eval()
         return net
 
-    def _generate_collocation_grid(self, n_points: int) -> np.ndarray:
-        rng = np.random.default_rng(seed=12345)
-        total_dim = self._fm.total_input_dim
-        return rng.uniform(-2.0, 2.0, size=(n_points, total_dim))
-
-    # ------------------------------------------------------------------
-    # Save / load
-    # ------------------------------------------------------------------
-
-    def _save(self) -> None:
+    def _save(self, X_test: np.ndarray, Y_test: np.ndarray) -> None:
         d = self._output_dir
         d.mkdir(parents=True, exist_ok=True)
+        np.save(d / "phase3_X_test_full.npy", X_test)
+        np.save(d / "phase3_Y_test_full.npy", Y_test)
+
+        p3 = self._cfg["phase3"]
+        p3_nn = p3["nn"]
+        hidden_dims = p3_nn.get("hidden_dims", [256, 128, 64])
+
         torch.save(self._reducer.state_dict(), d / "reducer.pt")
-        meta = {
-            "input_dim": self._fm.total_input_dim,
-            "hidden_dims": self._cfg["phase3"]["nn"]["hidden_dims"],
-            "training_signal": self._cfg["phase3"]["training_signal"],
-            "config_hash": self._cm.config_hash(),
-        }
-        with open(d / "config.json", "w", encoding='utf-8') as f:
-            json.dump(meta, f, indent=2)
         np.save(d / "X_mean.npy", self._X_mean)
         np.save(d / "X_std.npy", self._X_std)
+        np.save(d / "Xr_mean.npy", self._Xr_mean)
+        np.save(d / "Xr_std.npy", self._Xr_std)
+
+        meta = {
+            "full_dim": self.full_dim,
+            "reduced_dim": self.reduced_dim,
+            "hidden_dims": hidden_dims,
+            "training_signal": p3.get("training_signal", "surrogate"),
+            "surrogate_dir": str(self._surrogate_dir),
+            "config_hash": self._cm.config_hash(),
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        }
+        with open(d / "config.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+    def _generate_collocation_grid(self, n_points: int) -> np.ndarray:
+        """Generate a grid in the full parameter space for legacy compatibility."""
+        rng = np.random.default_rng(seed=999)
+        total_dim = self.full_dim
+        return rng.uniform(-2.0, 2.0, size=(n_points, total_dim))

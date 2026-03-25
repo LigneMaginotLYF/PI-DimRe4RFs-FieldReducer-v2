@@ -3,28 +3,23 @@ phase3_evaluator.py
 ===================
 Phase 3: Dimension reducer evaluation.
 
-Computes prediction metrics (settlement) and generates diagnostic plots for
-a trained Phase-3 reducer, including material-field heatmap comparisons.
-Everything is stored in a timestamped sub-folder.
+Evaluation is ALWAYS physics-driven:
+  - Ground truth: Y_full = P(E_full, k_h_full, k_v_full)  [Biot on full fields]
+  - Prediction:   Y_red  = P(E_red, k_h_red, k_v_red)    [Biot on reduced fields]
+
+The Phase-2 surrogate is NEVER used for evaluation, even if Phase 3 was
+trained with the surrogate loss.  This ensures evaluation reflects true
+physics preservation.
 
 Output layout::
 
-    results/<run_id>/phase3_reducer/<model_name>_<YYYYMMDD_HHMMSS>/
+    <output_dir>/<model_name>_<YYYYMMDD_HHMMSS>/
         metrics.json
         plots/
             settlement_comparison.png
             E_field_comparison.png
             k_h_field_comparison.png
             k_v_field_comparison.png
-
-Usage
------
-::
-
-    from src.phase3_evaluator import Phase3Evaluator
-    evaluator = Phase3Evaluator(config_manager)
-    results = evaluator.run(X_test, Y_test, reducer=trained_reducer,
-                            surrogate=loaded_surrogate)
 """
 
 from __future__ import annotations
@@ -38,8 +33,8 @@ import numpy as np
 
 from .config_manager import ConfigManager
 from .field_manager import FieldManager
+from .forward_solver import BiotSolver
 from .phase3_reducer import Phase3Reducer
-from .surrogate_models import BaseSurrogate
 from .utils import compute_metrics
 from .visualization_v2 import (
     plot_settlement_comparison_global_y,
@@ -48,14 +43,12 @@ from .visualization_v2 import (
 
 
 class Phase3Evaluator:
-    """Evaluate a Phase-3 reducer and persist metrics + plots.
+    """Evaluate a Phase-3 reducer using direct Biot physics.
 
     Parameters
     ----------
     config_manager : ConfigManager
     output_dir : str, optional
-        Base directory for evaluation artefacts.  Defaults to
-        ``phase3.output_dir`` from the config.
     """
 
     def __init__(
@@ -65,10 +58,20 @@ class Phase3Evaluator:
     ) -> None:
         self._cm = config_manager
         self._cfg = config_manager.cfg
-        self._base_dir = Path(output_dir or self._cfg["phase3"]["output_dir"])
-        self._fm = FieldManager(self._cfg)
+        p3 = self._cfg["phase3"]
+        self._base_dir = Path(output_dir or p3["output_dir"])
 
-        p3_eval = self._cfg.get("phase3", {}).get("evaluation", {})
+        # Full-space FieldManager (to reconstruct full fields)
+        full_fields_cfg = p3.get("full_fields")
+        self._fm_full = FieldManager(self._cfg, fields_override=full_fields_cfg)
+
+        # Reduced-space FieldManager (to reconstruct reduced fields)
+        reduced_fields_cfg = p3.get("reduced_fields")
+        self._fm_reduced = FieldManager(self._cfg, fields_override=reduced_fields_cfg)
+
+        self._solver = BiotSolver(self._cfg)
+
+        p3_eval = p3.get("evaluation", {})
         self._test_fraction: float = float(p3_eval.get("test_fraction", 0.2))
         self._n_plot_samples: int = int(p3_eval.get("n_plot_samples", 5))
 
@@ -78,95 +81,94 @@ class Phase3Evaluator:
 
     def run(
         self,
-        X_test: np.ndarray,
-        Y_test: np.ndarray,
+        X_test_full: np.ndarray,
+        Y_test_full: np.ndarray,
         reducer: Phase3Reducer,
-        surrogate: Optional[BaseSurrogate] = None,
         model_name: str = "reducer",
     ) -> Dict[str, Any]:
-        """Evaluate *reducer* on *(X_test, Y_test)* and save all artefacts.
+        """Evaluate *reducer* using direct Biot physics.
 
-        The settlement prediction is obtained by:
-          1. Passing *X_test* through the reducer to get *X_reduced*.
-          2. If *surrogate* is provided, predicting settlements from *X_reduced*
-             via the surrogate.  Otherwise, the original settlement array *Y_test*
-             is used as the reference (only field-reconstruction quality is
-             measured).
-
-        Material field comparisons reconstruct both the original (*X_test*)
-        and reduced (*X_reduced*) physical fields using :class:`FieldManager`
-        and generate heatmap grids.
+        Steps:
+          1. X_reduced = P3(X_test_full)
+          2. Reconstruct reduced material fields
+          3. Y_pred = P(E_red, k_h_red, k_v_red)  [Biot, NOT surrogate]
+          4. Compare Y_test_full vs Y_pred
 
         Parameters
         ----------
-        X_test : (n_test, input_dim)
+        X_test_full : (n_test, full_dim)
             Held-out full-dimensional coefficient vectors.
-        Y_test : (n_test, n_nodes_x)
-            Ground-truth settlement profiles.
+        Y_test_full : (n_test, n_nodes_x)
+            Ground-truth settlement profiles (from full-field Biot).
         reducer : Phase3Reducer
-            Trained Phase-3 reducer (must have ``reduce`` method available).
-        surrogate : BaseSurrogate, optional
-            Phase-2 surrogate for settlement prediction from reduced params.
-            Required to compute settlement metrics; if *None* only field-
-            reconstruction metrics are computed.
+            Trained Phase-3 reducer.
         model_name : str
             Used to construct the timestamped output folder name.
 
         Returns
         -------
-        dict with keys:
-          - ``metrics``       : dict of metric name → float (settlement if
-                                surrogate provided, else field-reconstruction)
-          - ``metrics_path``  : path to *metrics.json*
-          - ``plots``         : dict of plot name → path string
-          - ``output_dir``    : str path of the timestamped folder
+        dict with metrics, paths.
         """
-        # Timestamped output directory
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self._base_dir / f"{model_name}_{ts}"
         plots_dir = run_dir / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Reduce
-        X_reduced = reducer.reduce(X_test)
+        print(f"[Phase 3 Eval] Reducing {len(X_test_full)} test samples ...")
+        X_reduced = reducer.reduce(X_test_full)
 
-        # Settlement prediction
+        print("[Phase 3 Eval] Running Biot solver on reduced fields ...")
+        fields_reduced = self._fm_reduced.reconstruct_all_fields(X_reduced)
+        Y_pred = self._solver.run_batch(
+            fields_reduced["E"], fields_reduced["k_h"], fields_reduced["k_v"]
+        )
+        print("[Phase 3 Eval] Biot evaluation complete.")
+
+        # Settlement metrics
+        settlement_metrics = compute_metrics(Y_test_full, Y_pred)
+        print(
+            f"[Phase 3 Eval] R²={settlement_metrics.get('R2', float('nan')):.4f} | "
+            f"RMSE={settlement_metrics.get('RMSE', float('nan')):.4e} | "
+            f"Rel-L2={settlement_metrics.get('relative_L2', float('nan')):.4e}"
+        )
+
         plots: Dict[str, str] = {}
-        settlement_metrics: Dict[str, float] = {}
-        n_nodes_x = Y_test.shape[1]
 
-        if surrogate is not None:
-            Y_pred = surrogate.predict(X_reduced)
-            settlement_metrics = compute_metrics(Y_test, Y_pred)
-            plot_path = plots_dir / "settlement_comparison.png"
-            plot_settlement_comparison_global_y(
-                y_true=Y_test,
-                y_pred=Y_pred,
-                n_nodes_x=n_nodes_x,
-                save_path=plot_path,
-                title=f"Phase 3 – {model_name} – settlement comparison",
-                n_samples=self._n_plot_samples,
-            )
-            plots["settlement_comparison"] = str(plot_path)
+        # Settlement comparison plot
+        n_nodes_x = Y_test_full.shape[1]
+        plot_path = plots_dir / "settlement_comparison.png"
+        plot_settlement_comparison_global_y(
+            y_true=Y_test_full,
+            y_pred=Y_pred,
+            n_nodes_x=n_nodes_x,
+            lx=self._fm_full.lx,
+            save_path=plot_path,
+            title="Phase 3 – settlement: P(full) vs P(reduced) [Biot]",
+            n_samples=self._n_plot_samples,
+            label_true="P(full fields) [ground truth]",
+            label_pred="P(reduced fields) [Biot]",
+        )
+        plots["settlement_comparison"] = str(plot_path)
 
         # Material field comparisons
-        fields_orig = self._fm.reconstruct_all_fields(X_test)
-        fields_redu = self._fm.reconstruct_all_fields(X_reduced)
+        fields_full = self._fm_full.reconstruct_all_fields(X_test_full)
         field_plots = plot_all_material_fields(
-            fields_orig_dict=fields_orig,
-            fields_redu_dict=fields_redu,
-            n_nodes_x=self._fm.n_nodes_x,
-            n_nodes_z=self._fm.n_nodes_z,
+            fields_orig_dict=fields_full,
+            fields_redu_dict=fields_reduced,
+            n_nodes_x=self._fm_full.n_nodes_x,
+            n_nodes_z=self._fm_full.n_nodes_z,
+            lx=self._fm_full.lx,
+            lz=self._fm_full.lz,
             output_dir=plots_dir,
             n_samples=self._n_plot_samples,
         )
         plots.update(field_plots)
 
-        # Field-reconstruction L2 metrics (always computed)
+        # Field-reconstruction metrics
         field_metrics: Dict[str, float] = {}
         for name in ("E", "k_h", "k_v"):
-            if name in fields_orig and name in fields_redu:
-                m = compute_metrics(fields_orig[name], fields_redu[name])
+            if name in fields_full and name in fields_reduced:
+                m = compute_metrics(fields_full[name], fields_reduced[name])
                 for k, v in m.items():
                     field_metrics[f"{name}_{k}"] = v
 
@@ -178,8 +180,9 @@ class Phase3Evaluator:
             json.dump(
                 {
                     "metrics": metrics,
-                    "n_test": int(len(X_test)),
-                    "training_signal": self._cfg["phase3"]["training_signal"],
+                    "n_test": int(len(X_test_full)),
+                    "evaluation_mode": "physics_biot",
+                    "training_signal": self._cfg["phase3"].get("training_signal", "surrogate"),
                     "config_hash": self._cm.config_hash(),
                 },
                 f,
