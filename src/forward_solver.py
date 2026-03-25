@@ -61,19 +61,19 @@ class BiotSolver:
         grid = cfg["grid"]
         solver_cfg = cfg["solver"]
 
-        self.n_nodes_x: int = grid["n_nodes_x"]
-        self.n_nodes_z: int = grid["n_nodes_z"]
-        self.lx: float = grid["lx"]
-        self.lz: float = grid["lz"]
+        self.n_nodes_x: int = int(grid["n_nodes_x"])
+        self.n_nodes_z: int = int(grid["n_nodes_z"])
+        self.lx: float = float(grid["lx"])
+        self.lz: float = float(grid["lz"])
 
         self.solver_type: str = solver_cfg.get("type", "1d")
         self.mode: str = solver_cfg.get("mode", "steady")
-        self.nu_biot: float = solver_cfg.get("nu_biot", 0.3)
-        self.fluid_viscosity: float = solver_cfg.get("fluid_viscosity", 1.0e-3)
-        self.fluid_compressibility: float = solver_cfg.get("fluid_compressibility", 4.5e-10)
-        self.load: float = solver_cfg.get("load", 1.0e4)
-        self.dt: float = solver_cfg.get("transient", {}).get("dt", 0.01)
-        self.n_steps: int = solver_cfg.get("transient", {}).get("n_steps", 100)
+        self.nu_biot: float = float(solver_cfg.get("nu_biot", 0.3))
+        self.fluid_viscosity: float = float(solver_cfg.get("fluid_viscosity", 1.0e-3))
+        self.fluid_compressibility: float = float(solver_cfg.get("fluid_compressibility", 4.5e-10))
+        self.load: float = float(solver_cfg.get("load", 1.0e4))
+        self.dt: float = float(solver_cfg.get("transient", {}).get("dt", 0.01))
+        self.n_steps: int = int(solver_cfg.get("transient", {}).get("n_steps", 100))
 
         self.dz: float = self.lz / max(self.n_nodes_z - 1, 1)
         self.dx: float = self.lx / max(self.n_nodes_x - 1, 1)

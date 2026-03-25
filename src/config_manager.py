@@ -299,12 +299,18 @@ class ConfigManager:
 
         _coerce_dict(config)
 
-        # Explicitly handle grid integer fields
+        # Explicitly handle grid fields
         grid = config.get('grid', {})
         for key in ('n_nodes_x', 'n_nodes_z'):
             if key in grid and grid[key] is not None:
                 try:
                     grid[key] = int(grid[key])
+                except (ValueError, TypeError):
+                    pass
+        for key in ('lx', 'lz'):
+            if key in grid and grid[key] is not None:
+                try:
+                    grid[key] = float(grid[key])
                 except (ValueError, TypeError):
                     pass
 
