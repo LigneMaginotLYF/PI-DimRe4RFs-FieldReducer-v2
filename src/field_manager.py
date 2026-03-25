@@ -91,32 +91,32 @@ class FieldConfig:
         # --- Unified → legacy key resolution ---
         # E_ref / mean
         if "mean" in d:
-            E_ref = d["mean"]
+            E_ref = float(d["mean"])
         else:
-            E_ref = d.get("E_ref", 10.0e6)
+            E_ref = float(d.get("E_ref", 10.0e6))
 
         # logE_std / fluctuation_std
         if "fluctuation_std" in d:
-            logE_std = d["fluctuation_std"]
+            logE_std = float(d["fluctuation_std"])
         else:
-            logE_std = d.get("logE_std", 1.0)
+            logE_std = float(d.get("logE_std", 1.0))
 
         # k_range / range
         if "range" in d:
-            k_range = tuple(d["range"])
+            k_range = tuple(float(x) for x in d["range"])
         else:
-            k_range = tuple(d.get("k_range", [1.0e-13, 1.0e-10]))
+            k_range = tuple(float(x) for x in d.get("k_range", [1.0e-13, 1.0e-10]))
 
         return cls(
             name=name,
-            n_terms=d.get("n_terms", 0),
-            seed=d.get("seed", 0),
-            nu_ref=d.get("nu_ref", 1.5),
+            n_terms=int(d.get("n_terms", 0)),
+            seed=int(d.get("seed", 0)),
+            nu_ref=float(d.get("nu_ref", 1.5)),
             nu_sampling=d.get("nu_sampling", False),
-            nu_range=tuple(d.get("nu_range", [0.5, 2.5])),
-            length_scale_ref=d.get("length_scale_ref", 0.3),
+            nu_range=tuple(float(x) for x in d.get("nu_range", [0.5, 2.5])),
+            length_scale_ref=float(d.get("length_scale_ref", 0.3)),
             length_scale_sampling=d.get("length_scale_sampling", False),
-            length_scale_range=tuple(d.get("length_scale_range", [0.1, 0.5])),
+            length_scale_range=tuple(float(x) for x in d.get("length_scale_range", [0.1, 0.5])),
             force_identity_reduction=d.get("force_identity_reduction", False),
             logE_std=logE_std,
             E_ref=E_ref,
