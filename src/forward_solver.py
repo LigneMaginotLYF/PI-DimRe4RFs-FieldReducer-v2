@@ -82,6 +82,55 @@ class BiotSolver:
     # Public API
     # ------------------------------------------------------------------
 
+    def validate_inputs(
+        self,
+        E_field: np.ndarray,
+        k_h_field: np.ndarray,
+        k_v_field: np.ndarray,
+    ) -> tuple:
+        """Validate and coerce solver inputs to float64.
+
+        Parameters
+        ----------
+        E_field, k_h_field, k_v_field : array-like, shape (n_nodes,)
+
+        Returns
+        -------
+        Tuple of validated (E_field, k_h_field, k_v_field) as float64 arrays.
+
+        Raises
+        ------
+        ValueError
+            If any field contains NaN/Inf or non-positive values, or has the
+            wrong shape.
+        """
+        expected_size = self.n_nodes_x * self.n_nodes_z
+        validated = []
+        for name, field in (
+            ("E", E_field),
+            ("k_h", k_h_field),
+            ("k_v", k_v_field),
+        ):
+            field = np.asarray(field, dtype=np.float64)
+            if field.size != expected_size:
+                raise ValueError(
+                    f"{name}_field has {field.size} elements, "
+                    f"expected {expected_size} (n_nodes_x={self.n_nodes_x} "
+                    f"× n_nodes_z={self.n_nodes_z})"
+                )
+            field = field.ravel()
+            if np.any(np.isnan(field)):
+                raise ValueError(f"{name}_field contains NaN values")
+            if np.any(np.isinf(field)):
+                raise ValueError(f"{name}_field contains Inf values")
+            if np.any(field <= 0):
+                raise ValueError(
+                    f"{name}_field must be strictly positive; "
+                    f"got min={np.min(field):.3g}"
+                )
+            validated.append(field)
+        return tuple(validated)
+
     def run(
         self,
         E_field: np.ndarray,
@@ -100,6 +149,9 @@ class BiotSolver:
         -------
         settlement : (n_nodes_x,) array  — surface settlement at each x node [m]
         """
+        E_field, k_h_field, k_v_field = self.validate_inputs(
+            E_field, k_h_field, k_v_field
+        )
         E = E_field.reshape(self.n_nodes_x, self.n_nodes_z)
         k_h = k_h_field.reshape(self.n_nodes_x, self.n_nodes_z)
         k_v = k_v_field.reshape(self.n_nodes_x, self.n_nodes_z)

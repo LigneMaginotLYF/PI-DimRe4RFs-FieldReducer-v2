@@ -193,7 +193,7 @@ class Phase3Reducer:
     def load(self) -> "_ReducerNet":
         """Load a previously trained reducer from disk."""
         d = self._output_dir
-        with open(d / "config.json") as f:
+        with open(d / "config.json", encoding='utf-8') as f:
             meta = json.load(f)
         input_dim = meta["input_dim"]
         hidden_dims = meta["hidden_dims"]
@@ -525,7 +525,7 @@ class Phase3Reducer:
             "training_signal": self._cfg["phase3"]["training_signal"],
             "config_hash": self._cm.config_hash(),
         }
-        with open(d / "config.json", "w") as f:
+        with open(d / "config.json", "w", encoding='utf-8') as f:
             json.dump(meta, f, indent=2)
         np.save(d / "X_mean.npy", self._X_mean)
         np.save(d / "X_std.npy", self._X_std)

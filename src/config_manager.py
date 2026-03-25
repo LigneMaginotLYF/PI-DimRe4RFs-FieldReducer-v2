@@ -11,11 +11,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default configuration (minimal, always valid)
@@ -165,14 +168,14 @@ class ConfigManager:
             path = Path(path)
             if not path.exists():
                 raise FileNotFoundError(f"Config file not found: {path}")
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 user_cfg = yaml.safe_load(f) or {}
             cfg = _deep_merge(cfg, user_cfg)
 
         if overrides:
             cfg = _deep_merge(cfg, overrides)
 
-        self._cfg = cfg
+        self._cfg = self._coerce_numeric_types(cfg)
         self._validate()
 
     # ------------------------------------------------------------------
@@ -202,7 +205,7 @@ class ConfigManager:
         """Persist the merged configuration to a YAML file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding='utf-8') as f:
             yaml.safe_dump(self._cfg, f, default_flow_style=False)
 
     # ------------------------------------------------------------------
@@ -245,6 +248,93 @@ class ConfigManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _coerce_numeric_types(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure all numeric config values are proper Python floats/ints.
+
+        YAML may load numeric values as strings (especially on systems with
+        non-default YAML parsers or when values are quoted in the file).
+        This method converts all known numeric fields to the appropriate type.
+        """
+        _float_fields = {
+            'E_ref', 'mean', 'fluctuation_std', 'logE_std',
+            'nu_ref', 'length_scale_ref',
+            'learning_rate', 'lr', 'hybrid_alpha',
+            'val_fraction',
+        }
+        _int_fields = {
+            'n_terms', 'seed', 'n_samples', 'n_output_modes',
+            'epochs', 'batch_size', 'patience', 'degree',
+            'n_points', 'n_test_samples',
+        }
+        _list_float_fields = {
+            'range', 'nu_range', 'length_scale_range', 'k_range',
+        }
+
+        def _coerce_dict(d: Dict) -> None:
+            for key, val in d.items():
+                if key in _float_fields and val is not None:
+                    try:
+                        d[key] = float(val)
+                    except (ValueError, TypeError) as e:
+                        logger.warning("Could not coerce %s=%r to float: %s", key, val, e)
+                elif key in _int_fields and val is not None:
+                    try:
+                        d[key] = int(val)
+                    except (ValueError, TypeError) as e:
+                        logger.warning("Could not coerce %s=%r to int: %s", key, val, e)
+                elif key in _list_float_fields and isinstance(val, (list, tuple)):
+                    try:
+                        d[key] = [float(x) for x in val]
+                    except (ValueError, TypeError) as e:
+                        logger.warning(
+                            "Could not coerce %s=%r to float list: %s", key, val, e
+                        )
+                elif isinstance(val, dict):
+                    _coerce_dict(val)
+                elif isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            _coerce_dict(item)
+
+        _coerce_dict(config)
+
+        # Explicitly handle grid integer fields
+        grid = config.get('grid', {})
+        for key in ('n_nodes_x', 'n_nodes_z'):
+            if key in grid and grid[key] is not None:
+                try:
+                    grid[key] = int(grid[key])
+                except (ValueError, TypeError):
+                    pass
+
+        # Explicitly handle solver fields
+        solver = config.get('solver', {})
+        for key in ('n_steps',):
+            if key in solver and solver[key] is not None:
+                try:
+                    solver[key] = int(solver[key])
+                except (ValueError, TypeError):
+                    pass
+        for key in ('nu_biot', 'fluid_viscosity', 'fluid_compressibility', 'load'):
+            if key in solver and solver[key] is not None:
+                try:
+                    solver[key] = float(solver[key])
+                except (ValueError, TypeError):
+                    pass
+        transient = solver.get('transient', {})
+        if 'dt' in transient:
+            try:
+                transient['dt'] = float(transient['dt'])
+            except (ValueError, TypeError):
+                pass
+        if 'n_steps' in transient:
+            try:
+                transient['n_steps'] = int(transient['n_steps'])
+            except (ValueError, TypeError):
+                pass
+
+        return config
 
     def _validate(self) -> None:
         """Basic sanity checks on the merged configuration."""
