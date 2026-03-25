@@ -226,7 +226,7 @@ class Phase2Surrogate:
             "n_output_modes": self._cfg["phase2"]["n_output_modes"],
             "config_hash": self._cm.config_hash(),
         }
-        with open(d / "config.json", "w") as f:
+        with open(d / "config.json", "w", encoding='utf-8') as f:
             json.dump(meta, f, indent=2)
 
 

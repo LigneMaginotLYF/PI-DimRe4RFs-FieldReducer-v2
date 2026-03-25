@@ -330,7 +330,7 @@ class NNSurrogate(BaseSurrogate):
             # Legacy directory format
             path.mkdir(parents=True, exist_ok=True)
             torch.save(self._model.state_dict(), path / "model.pt")
-            with open(path / "meta.json", "w") as f:
+            with open(path / "meta.json", "w", encoding='utf-8') as f:
                 json.dump(meta, f)
             np.save(path / "X_mean.npy", self._X_mean)
             np.save(path / "X_std.npy", self._X_std)
@@ -367,7 +367,7 @@ class NNSurrogate(BaseSurrogate):
             return obj
         else:
             # Legacy directory format
-            with open(path / "meta.json") as f:
+            with open(path / "meta.json", encoding='utf-8') as f:
                 meta = json.load(f)
             obj = cls(
                 input_dim=meta["input_dim"],

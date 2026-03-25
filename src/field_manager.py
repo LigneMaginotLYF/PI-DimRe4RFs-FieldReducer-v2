@@ -275,6 +275,7 @@ class FieldManager:
         field : (n_nodes,) or (n_samples, n_nodes) array of physical values
         """
         fc = self.field_configs[field_name]
+        xi = np.asarray(xi, dtype=np.float64)
         single = xi.ndim == 1
         if single:
             xi = xi[np.newaxis, :]
@@ -285,6 +286,16 @@ class FieldManager:
             basis = self.get_basis(fc.n_terms)  # (n_nodes, n_terms)
             field = xi @ basis.T  # (n_samples, n_nodes)
             field = self._apply_physical_transform(field, field_name)
+
+        field = np.asarray(field, dtype=np.float64)
+        if np.any(np.isnan(field)):
+            raise ValueError(
+                f"Field '{field_name}' contains NaN values after reconstruction."
+            )
+        if np.any(np.isinf(field)):
+            raise ValueError(
+                f"Field '{field_name}' contains Inf values after reconstruction."
+            )
 
         return field[0] if single else field
 
@@ -297,10 +308,14 @@ class FieldManager:
         k_h, k_v : k = exp( log(k_mid) + raw * scale )  [log-uniform-like]
         """
         fc = self.field_configs[field_name]
+        raw = np.asarray(raw, dtype=np.float64)
         if field_name == "E":
-            return fc.E_ref * np.exp(raw * fc.logE_std)
+            E_ref = float(fc.E_ref)
+            logE_std = float(fc.logE_std)
+            return E_ref * np.exp(raw * logE_std)
         else:
-            lo, hi = np.log10(fc.k_range[0]), np.log10(fc.k_range[1])
+            lo = float(np.log10(fc.k_range[0]))
+            hi = float(np.log10(fc.k_range[1]))
             k_mid = (lo + hi) / 2.0
             k_scale = (hi - lo) / 2.0
             return 10.0 ** (k_mid + raw * k_scale)
@@ -315,12 +330,15 @@ class FieldManager:
         """
         fc = self.field_configs[field_name]
         n_samples = xi.shape[0]
-        scalar = xi[:, 0]  # (n_samples,)
+        scalar = np.asarray(xi[:, 0], dtype=np.float64)
 
         if field_name == "E":
-            phys = fc.E_ref * np.exp(scalar * fc.logE_std)
+            E_ref = float(fc.E_ref)
+            logE_std = float(fc.logE_std)
+            phys = E_ref * np.exp(scalar * logE_std)
         else:
-            lo, hi = np.log10(fc.k_range[0]), np.log10(fc.k_range[1])
+            lo = float(np.log10(fc.k_range[0]))
+            hi = float(np.log10(fc.k_range[1]))
             k_mid = (lo + hi) / 2.0
             k_scale = (hi - lo) / 2.0
             phys = 10.0 ** (k_mid + scalar * k_scale)

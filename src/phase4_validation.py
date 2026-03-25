@@ -110,7 +110,7 @@ class Phase4Validator:
         summary["per_sample_mean_error"] = float(np.mean(metrics["per_sample_errors"]))
         summary["per_sample_std_error"] = float(np.std(metrics["per_sample_errors"]))
         metrics_path = self._output_dir / "metrics.json"
-        with open(metrics_path, "w") as f:
+        with open(metrics_path, "w", encoding='utf-8') as f:
             json.dump(summary, f, indent=2)
 
         # Plots
