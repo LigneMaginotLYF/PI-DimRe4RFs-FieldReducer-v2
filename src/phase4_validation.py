@@ -122,6 +122,17 @@ class Phase4Validator:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _fm_for_reduced(self) -> FieldManager:
+        """Return the FieldManager appropriate for REDUCED coefficient vectors.
+
+        If a Phase-3 reducer is available, its ``field_manager_reduced``
+        is used (which has the ``reduced_fields`` configuration).  Otherwise
+        fall back to the full-space FieldManager (backward-compat).
+        """
+        if self._reducer is not None and hasattr(self._reducer, "field_manager_reduced"):
+            return self._reducer.field_manager_reduced
+        return self._fm
+
     def _predict(self, X: np.ndarray) -> np.ndarray:
         """Produce settlement predictions from full-dimensional coefficients."""
         use_physics = self._cfg["phase4"]["use_physics_for_plots"]
@@ -131,9 +142,11 @@ class Phase4Validator:
         else:
             X_reduced = X
 
+        fm_red = self._fm_for_reduced()
+
         if use_physics or self._surrogate is None:
-            # Direct solver
-            fields = self._fm.reconstruct_all_fields(X_reduced)
+            # Direct solver using REDUCED-space FieldManager
+            fields = fm_red.reconstruct_all_fields(X_reduced)
             return self._solver.run_batch(
                 fields["E"], fields["k_h"], fields["k_v"]
             )
@@ -156,13 +169,14 @@ class Phase4Validator:
         paths["settlement_comparison"] = p
 
         # Material field comparisons
+        fm_red = self._fm_for_reduced()
         if self._reducer is not None:
             X_reduced = self._reducer.reduce(X_test[:5])
         else:
             X_reduced = X_test[:5]
 
         orig_fields = self._fm.reconstruct_all_fields(X_test[:5])
-        reduced_fields = self._fm.reconstruct_all_fields(X_reduced)
+        reduced_fields = fm_red.reconstruct_all_fields(X_reduced)
 
         for name in ("E", "k_h", "k_v"):
             for i in range(min(2, len(X_test))):
@@ -176,7 +190,7 @@ class Phase4Validator:
                 )
                 plot_field_2d(
                     reduced_fields[name][i],
-                    nx, nz,
+                    fm_red.n_nodes_x, fm_red.n_nodes_z,
                     title=f"{name} sample {i} (reduced)",
                     save_path=p_red,
                 )

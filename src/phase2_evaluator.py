@@ -4,23 +4,14 @@ phase2_evaluator.py
 Phase 2: Surrogate model evaluation.
 
 Computes prediction metrics and generates diagnostic plots for a trained
-Phase-2 surrogate, saving everything to a timestamped sub-folder of the
-configured Phase-2 output directory.
+Phase-2 surrogate, saving everything to a timestamped sub-folder.
 
 Output layout::
 
-    results/<run_id>/phase2_surrogate/<model_name>_<YYYYMMDD_HHMMSS>/
+    <output_dir>/<model_name>_<YYYYMMDD_HHMMSS>/
         metrics.json
         plots/
             settlement_comparison.png
-
-Usage
------
-::
-
-    from src.phase2_evaluator import Phase2Evaluator
-    evaluator = Phase2Evaluator(config_manager)
-    results = evaluator.run(X_test, Y_test, surrogate=trained_surrogate)
 """
 
 from __future__ import annotations
@@ -33,6 +24,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .config_manager import ConfigManager
+from .field_manager import FieldManager
 from .surrogate_models import BaseSurrogate
 from .utils import compute_metrics
 from .visualization_v2 import plot_settlement_comparison_global_y
@@ -45,8 +37,6 @@ class Phase2Evaluator:
     ----------
     config_manager : ConfigManager
     output_dir : str, optional
-        Base directory for evaluation artefacts.  If *None*, falls back to
-        ``phase2.output_dir`` from the config.
     """
 
     def __init__(
@@ -56,9 +46,14 @@ class Phase2Evaluator:
     ) -> None:
         self._cm = config_manager
         self._cfg = config_manager.cfg
-        self._base_dir = Path(output_dir or self._cfg["phase2"]["output_dir"])
+        p2 = self._cfg["phase2"]
+        self._base_dir = Path(output_dir or p2["output_dir"])
 
-        p2_eval = self._cfg.get("phase2", {}).get("evaluation", {})
+        # Reduced-space FieldManager (for domain length metadata)
+        reduced_fields_cfg = p2.get("reduced_fields")
+        self._fm = FieldManager(self._cfg, fields_override=reduced_fields_cfg)
+
+        p2_eval = p2.get("evaluation", {})
         self._test_fraction: float = float(p2_eval.get("test_fraction", 0.2))
         self._n_plot_samples: int = int(p2_eval.get("n_plot_samples", 5))
 
@@ -77,48 +72,43 @@ class Phase2Evaluator:
 
         Parameters
         ----------
-        X_test : (n_test, input_dim)
-            Held-out coefficient vectors.
+        X_test : (n_test, reduced_dim)
         Y_test : (n_test, n_nodes_x)
-            Ground-truth settlement profiles.
         surrogate : BaseSurrogate
-            Trained Phase-2 surrogate.
         model_name : str
-            Used to construct the timestamped output folder name.
 
         Returns
         -------
-        dict with keys:
-          - ``metrics``       : dict of metric name → float
-          - ``metrics_path``  : path to *metrics.json*
-          - ``plots``         : dict of plot name → path string
-          - ``output_dir``    : str path of the timestamped folder
+        dict with metrics, paths.
         """
-        # Timestamped output directory
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self._base_dir / f"{model_name}_{ts}"
         plots_dir = run_dir / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Predict
         Y_pred = surrogate.predict(X_test)
-
-        # Metrics
         metrics = compute_metrics(Y_test, Y_pred)
         n_nodes_x = Y_test.shape[1]
 
-        # --- Settlement comparison plot (global y-axis) ---
+        print(
+            f"[Phase 2 Eval] R²={metrics.get('R2', float('nan')):.4f} | "
+            f"RMSE={metrics.get('RMSE', float('nan')):.4e} | "
+            f"Rel-L2={metrics.get('relative_L2', float('nan')):.4e}"
+        )
+
         plot_path = plots_dir / "settlement_comparison.png"
         plot_settlement_comparison_global_y(
             y_true=Y_test,
             y_pred=Y_pred,
             n_nodes_x=n_nodes_x,
+            lx=self._fm.lx,
             save_path=plot_path,
-            title=f"Phase 2 – {model_name} – settlement comparison",
+            title="Phase 2 – surrogate vs Biot ground truth",
             n_samples=self._n_plot_samples,
+            label_true="P(ξ') Biot [ground truth]",
+            label_pred="P2(ξ') surrogate",
         )
 
-        # --- Persist metrics ---
         metrics_path = run_dir / "metrics.json"
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -134,7 +124,6 @@ class Phase2Evaluator:
             )
 
         plots: Dict[str, str] = {"settlement_comparison": str(plot_path)}
-
         return {
             "metrics": metrics,
             "metrics_path": str(metrics_path),

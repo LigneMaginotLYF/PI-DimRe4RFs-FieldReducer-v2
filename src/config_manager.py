@@ -99,12 +99,35 @@ _DEFAULTS: Dict[str, Any] = {
         "surrogate_type": "nn",
         "output_repr": "direct",
         "n_output_modes": 10,
-        "training_signal": "data",
-        "hybrid_alpha": 0.5,
+        "training_signal": "hybrid",
+        "hybrid_alpha": 0.1,
+        "physics_check_interval": 10,
+        "n_training_samples": 200,
         "output_dir": "models/phase2_surrogate",
+        # reduced_fields defaults: E:dct(3), k_h:dct(2), k_v:scalar
+        "reduced_fields": {
+            "E": {
+                "n_terms": 3, "basis": "dct", "seed": 142,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
+            },
+            "k_h": {
+                "n_terms": 2, "basis": "dct", "seed": 143,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+            "k_v": {
+                "n_terms": 0, "basis": "dct", "seed": 144,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+        },
         "nn": {
             "hidden_dims": [128, 128, 64],
-            "epochs": 500,
+            "epochs": 200,
             "lr": 1.0e-3,
             "batch_size": 32,
             "patience": 50,
@@ -119,13 +142,57 @@ _DEFAULTS: Dict[str, Any] = {
     "phase3": {
         "reducer_type": "nn",
         "training_signal": "surrogate",
-        "hybrid_alpha": 0.5,
+        "n_training_samples": 500,
         "output_dir": "models/phase3_reducer",
         "surrogate_dir": "models/phase2_surrogate",
         "load_phase2_model": None,
+        # full_fields defaults: same as random_fields
+        "full_fields": {
+            "E": {
+                "n_terms": 5, "basis": "dct", "seed": 42,
+                "nu_sampling": True, "nu_range": [0.5, 2.5], "nu_ref": 1.5,
+                "length_scale_sampling": True, "length_scale_range": [0.1, 0.5],
+                "length_scale_ref": 0.3,
+                "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
+            },
+            "k_h": {
+                "n_terms": 0, "basis": "dct", "seed": 43,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+            "k_v": {
+                "n_terms": 2, "basis": "dct", "seed": 44,
+                "nu_sampling": True, "nu_range": [0.5, 2.5], "nu_ref": 1.5,
+                "length_scale_sampling": True, "length_scale_range": [0.1, 0.5],
+                "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+        },
+        # reduced_fields defaults: must match phase2.reduced_fields
+        "reduced_fields": {
+            "E": {
+                "n_terms": 3, "basis": "dct", "seed": 142,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
+            },
+            "k_h": {
+                "n_terms": 2, "basis": "dct", "seed": 143,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+            "k_v": {
+                "n_terms": 0, "basis": "dct", "seed": 144,
+                "nu_sampling": False, "nu_ref": 1.5,
+                "length_scale_sampling": False, "length_scale_ref": 0.3,
+                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
+            },
+        },
         "nn": {
             "hidden_dims": [256, 128, 64],
-            "epochs": 500,
+            "epochs": 300,
             "lr": 1.0e-3,
             "batch_size": 32,
             "patience": 50,
