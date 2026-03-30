@@ -69,12 +69,16 @@ def plot_settlement_comparison_global_y(
     collocation_x: Optional[np.ndarray] = None,
     label_true: str = "Ground truth",
     label_pred: str = "Prediction",
+    y_pred_surrogate: Optional[np.ndarray] = None,
+    label_pred_surrogate: str = "Surrogate prediction",
 ) -> None:
-    """Plot true vs predicted settlement profiles with a **shared** y-axis.
+    """Plot true vs predicted settlement profiles with **per-sample** y-axis limits.
 
-    The y-axis always starts from 0 (settlement is non-negative by convention)
-    and extends to the global maximum across all displayed samples plus 5 % margin.
-    The x-axis uses physical coordinates in metres.
+    Each subplot uses its own y-axis scaled to [0, max(curves for that sample)],
+    giving a fair visual comparison regardless of magnitude differences across samples.
+
+    An optional third curve (``y_pred_surrogate``) can be shown to compare the
+    Biot-decoded path against the surrogate-decoded path in Phase-3 evaluation.
 
     Parameters
     ----------
@@ -91,6 +95,10 @@ def plot_settlement_comparison_global_y(
     n_samples : int
     collocation_x : optional array of collocation x-positions [m]
     label_true, label_pred : legend labels
+    y_pred_surrogate : (n_total, n_nodes_x) or None
+        Optional third curve (surrogate-decoded prediction).
+    label_pred_surrogate : str
+        Legend label for the surrogate-decoded curve.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -101,22 +109,47 @@ def plot_settlement_comparison_global_y(
 
     shown_true = y_true[:n_show]
     shown_pred = y_pred[:n_show]
+    shown_surr = y_pred_surrogate[:n_show] if y_pred_surrogate is not None else None
 
-    # Global y range: start from 0, end at max + margin
-    y_max = max(shown_true.max(), shown_pred.max(), 0.0)
-    y_margin = max(abs(y_max) * 0.05, 1e-10)
-
-    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 3.5), sharey=True)
+    # Per-sample y range (no shared axis)
+    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 3.5))
     if n_show == 1:
         axes = [axes]
 
     for i, ax in enumerate(axes):
+        # Collect all curves to determine per-sample y-max
+        curves = [shown_true[i], shown_pred[i]]
+        if shown_surr is not None:
+            curves.append(shown_surr[i])
+
+        sample_y_max = max(float(np.max(c)) for c in curves)
+        sample_y_max = max(sample_y_max, 0.0)
+        y_margin = max(abs(sample_y_max) * 0.05, 1e-10)
+
+        # --- Debug summary for each plotted sample ---
+        _min_true = float(np.min(shown_true[i]))
+        _max_true = float(np.max(shown_true[i]))
+        _min_pred = float(np.min(shown_pred[i]))
+        _max_pred = float(np.max(shown_pred[i]))
+        print(
+            f"[Plot] Sample {i}: GT=[{_min_true:.3e}, {_max_true:.3e}] | "
+            f"Pred=[{_min_pred:.3e}, {_max_pred:.3e}]",
+            end="",
+        )
+        if shown_surr is not None:
+            _min_s = float(np.min(shown_surr[i]))
+            _max_s = float(np.max(shown_surr[i]))
+            print(f" | Surr=[{_min_s:.3e}, {_max_s:.3e}]", end="")
+        print()
+
         ax.plot(x_phys, shown_true[i], "b-", label=label_true, linewidth=1.5)
         ax.plot(x_phys, shown_pred[i], "r--", label=label_pred, linewidth=1.5)
+        if shown_surr is not None:
+            ax.plot(x_phys, shown_surr[i], "g:", label=label_pred_surrogate, linewidth=1.5)
         if collocation_x is not None:
             for xc in collocation_x:
                 ax.axvline(xc, color="gray", linewidth=0.5, linestyle=":", alpha=0.6)
-        ax.set_ylim(0.0, y_max + y_margin)
+        ax.set_ylim(0.0, sample_y_max + y_margin)
         ax.set_xlabel("Position [m]", fontsize=9)
         ax.set_title(f"Sample {i}", fontsize=9)
         if i == 0:
