@@ -44,6 +44,10 @@ import numpy as np
 
 from .utils import compute_dct_basis, matern_spectral_variance
 
+# Minimum allowed logE_std / k_scale denominator (prevents division by zero in
+# mean-sampling encoding when fluctuation_std is effectively zero).
+_MIN_LOG_STD: float = 1e-10
+
 
 # ---------------------------------------------------------------------------
 # Per-field configuration dataclass
@@ -70,6 +74,10 @@ class FieldConfig:
 
     # k_h / k_v specific
     k_range: Tuple[float, float] = (1.0e-13, 1.0e-10)
+
+    # Per-sample mean sampling (both E and k fields)
+    mean_sampling: bool = False
+    mean_range: Tuple[float, float] = (0.0, 0.0)  # physical units; [min, max] for E_ref or k_mean
 
     @property
     def effective_dim(self) -> int:
@@ -107,6 +115,28 @@ class FieldConfig:
         else:
             k_range = tuple(float(x) for x in d.get("k_range", [1.0e-13, 1.0e-10]))
 
+        # --- mean_sampling / mean_range ---
+        mean_sampling = bool(d.get("mean_sampling", False))
+        # Default mean_range: a degenerate range equal to the fixed mean
+        # (no variation when mean_sampling=False, or when range not provided).
+        if "mean_range" in d:
+            raw_mr = d["mean_range"]
+            mr = tuple(float(x) for x in raw_mr)
+            if len(mr) != 2 or mr[0] > mr[1]:
+                raise ValueError(
+                    f"FieldConfig '{name}': mean_range must be [min, max] with min <= max; "
+                    f"got {raw_mr}"
+                )
+        else:
+            # Default: degenerate range at the reference/fixed mean value
+            if name == "E":
+                mr = (E_ref, E_ref)
+            else:
+                lo = float(np.log10(k_range[0]))
+                hi = float(np.log10(k_range[1]))
+                k_mid_phys = 10.0 ** ((lo + hi) / 2.0)
+                mr = (k_mid_phys, k_mid_phys)
+
         return cls(
             name=name,
             n_terms=int(d.get("n_terms", 0)),
@@ -121,6 +151,8 @@ class FieldConfig:
             logE_std=logE_std,
             E_ref=E_ref,
             k_range=k_range,
+            mean_sampling=mean_sampling,
+            mean_range=mr,
         )
 
 
@@ -219,6 +251,13 @@ class FieldManager:
             array of log-scaled scalar parameters.
             For high-dimensional fields (n_terms > 0) this is a
             (n_samples, n_terms) array of weighted standard-normal draws.
+
+        When ``mean_sampling=True`` (and a valid ``mean_range`` is configured),
+        the DC (zeroth) coefficient is overridden to encode a per-sample mean
+        drawn uniformly from ``mean_range``.  This allows the surrogate and
+        reducer training datasets to span the full mean-value range of each
+        physical field.  Spatial fluctuation modes (indices 1 and above) are
+        still sampled from the Matérn spectral distribution.
         """
         fc = self.field_configs[field_name]
         rng = self._rngs[field_name]
@@ -238,6 +277,11 @@ class FieldManager:
             std = np.sqrt(var)
             xi[i] = rng.standard_normal(fc.n_terms) * std
 
+        # --- Optional per-sample mean override (DC component) ---
+        if fc.mean_sampling and fc.mean_range[0] < fc.mean_range[1]:
+            dc_override = self._sample_mean_as_dc_coeff(n_samples, field_name, fc, rng)
+            xi[:, 0] = dc_override
+
         return xi
 
     def _sample_scalar(
@@ -245,17 +289,78 @@ class FieldManager:
     ) -> np.ndarray:
         """Sample a single scalar per realisation (log-uniform for k_h/k_v,
         log-normal for E).
+
+        When ``mean_sampling=True`` the scalar directly encodes a mean value
+        drawn from ``mean_range``, so that the resulting homogeneous field has
+        the desired physical mean level.
         """
         fc = self.field_configs[field_name]
         if field_name == "E":
-            # log-normal: E = E_ref * exp(logE_std * N(0,1))
-            z = rng.standard_normal(n_samples)
-            return (z * fc.logE_std).reshape(n_samples, 1)
+            if fc.mean_sampling and fc.mean_range[0] < fc.mean_range[1]:
+                # Sample mean directly from mean_range (uniform)
+                e_mean = rng.uniform(fc.mean_range[0], fc.mean_range[1], size=n_samples)
+                # Encode so that E_ref * exp(scalar * logE_std) = e_mean
+                logE_std = max(fc.logE_std, _MIN_LOG_STD)
+                return (np.log(e_mean / fc.E_ref) / logE_std).reshape(n_samples, 1)
+            else:
+                # Original: log-normal fluctuation around E_ref
+                z = rng.standard_normal(n_samples)
+                return (z * fc.logE_std).reshape(n_samples, 1)
         else:
-            # log-uniform in k_range
             lo, hi = np.log10(fc.k_range[0]), np.log10(fc.k_range[1])
-            log_k = rng.uniform(lo, hi, size=n_samples)
-            return log_k.reshape(n_samples, 1)
+            k_mid = (lo + hi) / 2.0
+            k_scale = max((hi - lo) / 2.0, _MIN_LOG_STD)
+            if fc.mean_sampling and fc.mean_range[0] < fc.mean_range[1]:
+                # Sample k_mean log-uniformly from mean_range
+                lo_m = np.log10(fc.mean_range[0])
+                hi_m = np.log10(fc.mean_range[1])
+                log10_k_mean = rng.uniform(lo_m, hi_m, size=n_samples)
+                # Encode so that 10^(k_mid + scalar * k_scale) = 10^log10_k_mean
+                return ((log10_k_mean - k_mid) / k_scale).reshape(n_samples, 1)
+            else:
+                # Original: log-uniform in k_range
+                log_k = rng.uniform(lo, hi, size=n_samples)
+                return log_k.reshape(n_samples, 1)
+
+    def _sample_mean_as_dc_coeff(
+        self,
+        n_samples: int,
+        field_name: str,
+        fc: "FieldConfig",
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Compute DC coefficient values that encode a per-sample mean drawn
+        from ``fc.mean_range``.
+
+        The DC basis vector has constant value ``1/sqrt(n_nodes)`` (L2-norm = 1).
+        For E fields:
+            mean_E ≈ E_ref * exp(xi[0] * dc_basis * logE_std)
+            → xi_dc = log(E_mean / E_ref) / (dc_basis * logE_std)
+        For k fields:
+            mean_k ≈ 10^(k_mid + xi[0] * dc_basis * k_scale)
+            → xi_dc = (log10(k_mean) - k_mid) / (dc_basis * k_scale)
+
+        Returns
+        -------
+        xi_dc : (n_samples,) float64 array — DC coefficient overrides
+        """
+        dc_basis = 1.0 / np.sqrt(float(self.n_nodes))  # = basis[0, 0] for DC mode
+
+        if field_name == "E":
+            logE_std = max(fc.logE_std, _MIN_LOG_STD)
+            e_mean = rng.uniform(fc.mean_range[0], fc.mean_range[1], size=n_samples)
+            denominator = dc_basis * logE_std
+            return np.log(e_mean / fc.E_ref) / denominator
+        else:
+            lo = float(np.log10(fc.k_range[0]))
+            hi = float(np.log10(fc.k_range[1]))
+            k_mid = (lo + hi) / 2.0
+            k_scale = max((hi - lo) / 2.0, _MIN_LOG_STD)
+            lo_m = float(np.log10(fc.mean_range[0]))
+            hi_m = float(np.log10(fc.mean_range[1]))
+            log10_k_mean = rng.uniform(lo_m, hi_m, size=n_samples)
+            denominator = dc_basis * k_scale
+            return (log10_k_mean - k_mid) / denominator
 
     def _sample_nu(
         self, n_samples: int, fc: FieldConfig, rng: np.random.Generator

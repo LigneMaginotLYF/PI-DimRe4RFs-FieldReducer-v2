@@ -201,14 +201,36 @@ class Phase3Reducer:
         self._X_std = X_tr.std(axis=0)
         self._X_std[self._X_std < 1e-12] = 1.0
 
-        # Use a sample of reduced-space params to compute Xr normalization
-        # (sample from reduced space directly)
-        from .phase2_data_generator import Phase2DataGenerator
-        p2_gen = Phase2DataGenerator(self._cm)
-        Xr_sample, _ = p2_gen.generate()
-        self._Xr_mean = Xr_sample.mean(axis=0)
-        self._Xr_std = Xr_sample.std(axis=0)
-        self._Xr_std[self._Xr_std < 1e-12] = 1.0
+        # Load Phase-2 surrogate to get Xr normalization stats.
+        # When training_signal == "surrogate", we must load the surrogate anyway.
+        # When training_signal == "physics", we still load the surrogate ONLY for
+        # its normalization statistics (the surrogate itself is not used for grad).
+        # Fallback: generate a small fixed-seed sample if the surrogate is not found.
+        # NOTE: dimension mismatches (file found but wrong dim) are NOT caught here –
+        #       they raise ValueError as before to prevent silent bad training.
+        surrogate = None
+        try:
+            _surr_candidate = self._load_phase2_surrogate()
+            self._Xr_mean = _surr_candidate._X_mean.copy()
+            self._Xr_std = _surr_candidate._X_std.copy()
+            self._Xr_std[self._Xr_std < 1e-12] = 1.0
+            if signal_type == "surrogate":
+                surrogate = _surr_candidate
+            print("[Phase 3] Loaded Phase-2 surrogate for Xr normalization stats.")
+        except (FileNotFoundError, RuntimeError) as exc:
+            print(
+                f"[Phase 3] Could not load Phase-2 surrogate for Xr stats: {exc}. "
+                "Estimating from a fixed-seed reduced-space sample."
+            )
+            from .phase2_data_generator import Phase2DataGenerator
+            p2_gen = Phase2DataGenerator(self._cm)
+            Xr_sample, _ = p2_gen.generate()
+            self._Xr_mean = Xr_sample.mean(axis=0)
+            self._Xr_std = Xr_sample.std(axis=0)
+            self._Xr_std[self._Xr_std < 1e-12] = 1.0
+
+        # Store surrogate reference for later use (e.g. evaluator)
+        self._surrogate = surrogate
 
         p3_nn = p3["nn"]
         print(
@@ -216,13 +238,6 @@ class Phase3Reducer:
             f"(full_dim={self.full_dim} → reduced_dim={self.reduced_dim}, "
             f"signal={signal_type}) ..."
         )
-
-        # --- 5. Load Phase-2 surrogate if needed ---
-        surrogate = None
-        if signal_type == "surrogate":
-            print(f"[Phase 3] Loading Phase-2 surrogate from '{self._surrogate_dir}' ...")
-            surrogate = self._load_phase2_surrogate()
-            self._surrogate = surrogate
 
         # --- 6. Train ---
         if signal_type == "surrogate" and surrogate is not None:
