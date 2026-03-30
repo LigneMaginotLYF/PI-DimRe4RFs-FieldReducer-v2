@@ -45,7 +45,12 @@ automatically; all downstream code is unaffected.
 
 ---
 
-## `random_fields` — Material Random Field Definitions (Phase 1)
+## `random_fields` — Material Random Field Definitions (base template)
+
+Base field definitions used across the pipeline (Phase 1, and as the structural
+template for `data_generation.surrogate.fields` and `data_generation.reducer.fields`).
+Each phase-specific field block may add `mean_sampling`/`mean_range` on top of these
+shared keys.
 
 All three fields (`E`, `k_h`, `k_v`) share the same 2D DCT-II basis and differ only in the parameters below.
 

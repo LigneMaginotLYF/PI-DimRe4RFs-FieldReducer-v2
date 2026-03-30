@@ -44,6 +44,10 @@ import numpy as np
 
 from .utils import compute_dct_basis, matern_spectral_variance
 
+# Minimum allowed logE_std / k_scale denominator (prevents division by zero in
+# mean-sampling encoding when fluctuation_std is effectively zero).
+_MIN_LOG_STD: float = 1e-10
+
 
 # ---------------------------------------------------------------------------
 # Per-field configuration dataclass
@@ -296,7 +300,7 @@ class FieldManager:
                 # Sample mean directly from mean_range (uniform)
                 e_mean = rng.uniform(fc.mean_range[0], fc.mean_range[1], size=n_samples)
                 # Encode so that E_ref * exp(scalar * logE_std) = e_mean
-                logE_std = max(fc.logE_std, 1e-10)
+                logE_std = max(fc.logE_std, _MIN_LOG_STD)
                 return (np.log(e_mean / fc.E_ref) / logE_std).reshape(n_samples, 1)
             else:
                 # Original: log-normal fluctuation around E_ref
@@ -305,7 +309,7 @@ class FieldManager:
         else:
             lo, hi = np.log10(fc.k_range[0]), np.log10(fc.k_range[1])
             k_mid = (lo + hi) / 2.0
-            k_scale = max((hi - lo) / 2.0, 1e-10)
+            k_scale = max((hi - lo) / 2.0, _MIN_LOG_STD)
             if fc.mean_sampling and fc.mean_range[0] < fc.mean_range[1]:
                 # Sample k_mean log-uniformly from mean_range
                 lo_m = np.log10(fc.mean_range[0])
@@ -343,7 +347,7 @@ class FieldManager:
         dc_basis = 1.0 / np.sqrt(float(self.n_nodes))  # = basis[0, 0] for DC mode
 
         if field_name == "E":
-            logE_std = max(fc.logE_std, 1e-10)
+            logE_std = max(fc.logE_std, _MIN_LOG_STD)
             e_mean = rng.uniform(fc.mean_range[0], fc.mean_range[1], size=n_samples)
             denominator = dc_basis * logE_std
             return np.log(e_mean / fc.E_ref) / denominator
@@ -351,7 +355,7 @@ class FieldManager:
             lo = float(np.log10(fc.k_range[0]))
             hi = float(np.log10(fc.k_range[1]))
             k_mid = (lo + hi) / 2.0
-            k_scale = max((hi - lo) / 2.0, 1e-10)
+            k_scale = max((hi - lo) / 2.0, _MIN_LOG_STD)
             lo_m = float(np.log10(fc.mean_range[0]))
             hi_m = float(np.log10(fc.mean_range[1]))
             log10_k_mean = rng.uniform(lo_m, hi_m, size=n_samples)

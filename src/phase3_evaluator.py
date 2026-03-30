@@ -137,10 +137,17 @@ class Phase3Evaluator:
         # --- Finite check on reducer output ---
         if not np.all(np.isfinite(X_reduced)):
             n_bad = int(np.sum(~np.isfinite(X_reduced)))
+            pct_bad = 100.0 * n_bad / X_reduced.size
+            if pct_bad > 10.0:
+                raise ValueError(
+                    f"[Phase 3 Eval] {pct_bad:.1f}% of reducer outputs are non-finite "
+                    f"({n_bad}/{X_reduced.size} values). This indicates a serious problem "
+                    "with the reducer model. Check training convergence and input scaling."
+                )
             logger.warning(
-                "[Phase 3 Eval] %d non-finite values in reducer output (X_reduced). "
+                "[Phase 3 Eval] %d non-finite values (%.1f%%) in reducer output (X_reduced). "
                 "Replacing with zeros for evaluation.",
-                n_bad,
+                n_bad, pct_bad,
             )
             X_reduced = np.where(np.isfinite(X_reduced), X_reduced, 0.0)
 
