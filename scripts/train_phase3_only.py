@@ -28,6 +28,7 @@ def main():
     args = parser.parse_args()
 
     cm = ConfigManager(path=args.config)
+    cm.warn_if_transient_mode()
 
     # === PHASE 3 TRAINING ===
     print("[Phase 3] Starting reducer training ...")
@@ -41,8 +42,14 @@ def main():
     X_test = np.load(os.path.join(output_dir, "phase3_X_test_full.npy"))
     Y_test = np.load(os.path.join(output_dir, "phase3_Y_test_full.npy"))
 
+    # Pass the surrogate (loaded during training) so the settlement comparison
+    # plot shows all three curves: GT, Biot-decoded, and surrogate-decoded.
     evaluator = Phase3Evaluator(cm)
-    results = evaluator.run(X_test, Y_test, reducer=p3_trainer)
+    results = evaluator.run(
+        X_test, Y_test,
+        reducer=p3_trainer,
+        surrogate=p3_trainer.surrogate,
+    )
     m = results["metrics"]
     print(
         f"[Phase 3] R²={m.get('R2', float('nan')):.4f} | "

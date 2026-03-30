@@ -233,52 +233,9 @@ models:
     hybrid_alpha: 0.1
     physics_check_interval: 10
     output_dir: "models/phase2_surrogate"
-    # Reduced-space dimensionality config (must match data_generation.surrogate.fields n_terms).
-    # This section defines the model's input dimension; for mean_sampling in data
-    # generation use data_generation.surrogate.fields instead.
-    reduced_fields:
-      E:
-        n_terms: 3
-        basis: "dct"
-        seed: 142
-        covariance: "matern"
-        nu_sampling: false
-        nu_ref: 1.5
-        length_scale_sampling: false
-        length_scale_ref: 0.3
-        mean: 10.0e6
-        range: [5.0e6, 20.0e6]
-        fluctuation_std: 1.0
-        mean_sampling: true
-        mean_range: [5.0e6, 20.0e6]
-      k_h:
-        n_terms: 2
-        basis: "dct"
-        seed: 143
-        covariance: "matern"
-        nu_sampling: false
-        nu_ref: 1.5
-        length_scale_sampling: false
-        length_scale_ref: 0.3
-        mean: 1.0e-12
-        range: [1.0e-13, 1.0e-10]
-        fluctuation_std: 0.5
-        mean_sampling: true
-        mean_range: [1.0e-13, 1.0e-10]
-      k_v:
-        n_terms: 0
-        basis: "dct"
-        seed: 144
-        covariance: "matern"
-        nu_sampling: false
-        nu_ref: 1.5
-        length_scale_sampling: false
-        length_scale_ref: 0.3
-        mean: 1.0e-12
-        range: [1.0e-13, 1.0e-10]
-        fluctuation_std: 0.5
-        mean_sampling: true
-        mean_range: [1.0e-13, 1.0e-10]
+    # NOTE: field dimension config (n_terms, mean_sampling, etc.) is defined
+    # ONLY in data_generation.surrogate.fields — no duplication here.
+    # Both dataset generation and model training consume that single config.
     nn:
       hidden_dims: [128, 128, 64]
       epochs: 200
@@ -324,3 +281,8 @@ phase4:
   n_test_samples: 50
   output_dir: "results"
   use_physics_for_plots: false
+  # Seed control: set random_seed to an integer for reproducible sampling,
+  # or change it to get a different set of test samples.
+  # shuffle: true means sample order is randomised (consistent with seed).
+  random_seed: 0
+  shuffle: true

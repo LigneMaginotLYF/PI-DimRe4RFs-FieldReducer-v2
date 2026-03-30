@@ -16,6 +16,7 @@ def main():
     args = parser.parse_args()
 
     cm = ConfigManager(path=args.config)
+    cm.warn_if_transient_mode()
     cfg = cm.cfg
 
     # ===================================================================
@@ -57,7 +58,7 @@ def main():
     Y_test_p3 = np.load(os.path.join(output_dir_p3, "phase3_Y_test_full.npy"))
 
     p3_evaluator = Phase3Evaluator(cm)
-    p3_results = p3_evaluator.run(X_test_p3, Y_test_p3, reducer=p3_trainer)
+    p3_results = p3_evaluator.run(X_test_p3, Y_test_p3, reducer=p3_trainer, surrogate=surrogate)
     p3_m = p3_results["metrics"]
     print(
         f"[Phase 3] R²={p3_m.get('R2', float('nan')):.4f} | "
