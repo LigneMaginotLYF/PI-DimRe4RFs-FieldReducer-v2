@@ -103,11 +103,11 @@ def test_pipeline_with_pce_surrogate(tiny_cfg):
 def test_config_manager_defaults():
     from src.config_manager import ConfigManager
     cm = ConfigManager()
-    assert cm.n_terms_E == 5
+    assert cm.n_terms_E == 15
     assert cm.n_terms_kh == 0
-    assert cm.n_terms_kv == 2
-    # total_input_dim: max(5,1) + max(0,1) + max(2,1) = 5+1+2=8
-    assert cm.total_input_dim == 8
+    assert cm.n_terms_kv == 0
+    # total_input_dim: max(15,1) + max(0,1) + max(0,1) = 15+1+1=17
+    assert cm.total_input_dim == 17
 
 
 def test_config_manager_hash_stability():

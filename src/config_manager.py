@@ -7,37 +7,48 @@ All pipeline components receive a validated config dict produced here.
 
 Config format support
 ---------------------
-Two config formats are accepted:
+Three config formats are accepted (all translated internally to phase2/phase3):
 
-**New format** (recommended, as of this refactor):
-  Top-level sections:  ``data_generation``, ``models``, ``evaluation``, ``solver``, ``grid``.
-  Dataset generation configs for both models appear first, then model configs.
+**Canonical format** (recommended — single source of truth per model):
+  Top-level sections: ``model_a`` (surrogate), ``model_b`` (reducer), ``solver``, ``grid``.
+  Each model block contains field definitions, dataset generation counts,
+  model hyperparameters, and evaluation/plotting settings.  There is no
+  separate ``data_generation`` / ``models`` split, eliminating shadowing.
   Example::
 
-      data_generation:
-        surrogate:
-          n_samples: 200
-          fields: { E: {...}, k_h: {...}, k_v: {...} }
-        reducer:
-          n_samples: 500
-          fields: { E: {...}, k_h: {...}, k_v: {...} }
-      models:
-        surrogate:
-          type: "nn"
-          reduced_fields: { E: {...}, ... }
-          nn: { ... }
-        reducer:
-          type: "nn"
-          surrogate_dir: "..."
-          nn: { ... }
-      evaluation:
-        surrogate: { test_fraction: 0.2, n_plot_samples: 5 }
-        reducer:   { test_fraction: 0.2, n_plot_samples: 5 }
+      model_a:
+        fields: { E: {...}, k_h: {...}, k_v: {...} }  # single canonical definition
+        n_samples: 2000
+        output_dir: "models/phase2_surrogate"
+        type: "nn"
+        nn: { ... }
+        evaluation: { test_fraction: 0.1, n_plot_samples: 10 }
+      model_b:
+        fields: { E: {...}, k_h: {...}, k_v: {...} }  # full-space fields for reducer input
+        n_samples: 5000
+        output_dir: "models/phase3_reducer"
+        nn: { ... }
+        evaluation: { test_fraction: 0.1, n_plot_samples: 10, plot_mode: "three_curve" }
+
+  Note: ``model_b`` never specifies a ``reduced_fields`` block — it is always
+  derived from ``model_a.fields`` to guarantee consistency.
+
+**Intermediate format** (still accepted for backward compatibility):
+  Top-level sections:  ``data_generation``, ``models``, ``evaluation``, ``solver``, ``grid``.
+  Dataset generation configs for both models appear first, then model configs.
 
 **Old / legacy format** (still supported, no breaking change):
   Top-level sections: ``phase2``, ``phase3``, ``collocation_phase2``, ``collocation_phase3``.
   ``collocation_phase2`` / ``collocation_phase3`` are deprecated; move to
   ``phase2.collocation_n_points`` / ``phase3.collocation_n_points``.
+
+Single-source-of-truth enforcement
+------------------------------------
+Regardless of which format is used, ``phase3.reduced_fields`` is ALWAYS
+synchronised to equal ``phase2.reduced_fields`` after all translations and
+merges are applied.  If they differ (e.g. because of stale duplicate blocks),
+a ``UserWarning`` is emitted and the Phase-2 value is used for both, preventing
+the reducer→surrogate dimension mismatch.
 """
 
 from __future__ import annotations
@@ -65,9 +76,14 @@ _DEFAULTS: Dict[str, Any] = {
         "lx": 1.0,
         "lz": 0.5,
     },
+    # random_fields is used ONLY by Phase 1 (full-space dataset generation).
+    # For Phase 2/3, use model_a.fields (reduced-space) and model_b.fields
+    # (full-space) respectively.  n_terms here is intentionally the same as
+    # model_b.fields.E.n_terms (=15, full-space dimension); it is different from
+    # model_a.fields.E.n_terms (=8, reduced-space dimension).
     "random_fields": {
         "E": {
-            "n_terms": 5,
+            "n_terms": 15,
             "basis": "dct",
             "seed": 42,
             "covariance": "matern",
@@ -82,7 +98,7 @@ _DEFAULTS: Dict[str, Any] = {
             "range": [5.0e6, 20.0e6],
             "fluctuation_std": 1.0,
             "force_identity_reduction": False,
-            "mean_sampling": False,
+            "mean_sampling": True,
             "mean_range": [5.0e6, 20.0e6],
         },
         "k_h": {
@@ -99,11 +115,11 @@ _DEFAULTS: Dict[str, Any] = {
             "range": [1.0e-13, 1.0e-10],
             "fluctuation_std": 0.5,
             "force_identity_reduction": False,
-            "mean_sampling": False,
+            "mean_sampling": True,
             "mean_range": [1.0e-13, 1.0e-10],
         },
         "k_v": {
-            "n_terms": 2,
+            "n_terms": 0,
             "basis": "dct",
             "seed": 44,
             "covariance": "matern",
@@ -118,43 +134,45 @@ _DEFAULTS: Dict[str, Any] = {
             "range": [1.0e-13, 1.0e-10],
             "fluctuation_std": 0.5,
             "force_identity_reduction": False,
-            "mean_sampling": False,
+            "mean_sampling": True,
             "mean_range": [1.0e-13, 1.0e-10],
         },
     },
     "solver": {
-        "type": "1d",
+        "type": "2d",
         "mode": "steady",
         "nu_biot": 0.3,
         "fluid_viscosity": 1.0e-3,
         "fluid_compressibility": 4.5e-10,
-        "load": 1.0e4,
+        "load": 1.0e6,
         "transient": {"dt": 0.01, "n_steps": 100},
     },
     "phase1": {
-        "n_samples": 200,
+        "n_samples": 2000,
         "val_fraction": 0.2,
         "output_dir": "data",
     },
     # ---------------------------------------------------------------------------
-    # Phase 2 (surrogate): data generation + model + evaluation
+    # Phase 2 (surrogate / Model A): data generation + model + evaluation
     # ---------------------------------------------------------------------------
     "phase2": {
         # --- Dataset generation (reduced-space sampling) ---
-        "n_training_samples": 200,
+        "n_training_samples": 2000,
         "collocation_n_points": 20,  # canonical path (was: top-level collocation_phase2)
         # reduced_fields defines the reduced-space coefficient dimension;
-        # used by both data generation and the surrogate model.
+        # used by BOTH data generation AND the surrogate model.
+        # This is the SINGLE SOURCE OF TRUTH — it is also propagated to
+        # phase3.reduced_fields by _sync_reduced_fields().
         "reduced_fields": {
             "E": {
-                "n_terms": 3, "basis": "dct", "seed": 142,
+                "n_terms": 8, "basis": "dct", "seed": 142,
                 "nu_sampling": False, "nu_ref": 1.5,
                 "length_scale_sampling": False, "length_scale_ref": 0.3,
                 "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
                 "mean_sampling": True, "mean_range": [5.0e6, 20.0e6],
             },
             "k_h": {
-                "n_terms": 2, "basis": "dct", "seed": 143,
+                "n_terms": 0, "basis": "dct", "seed": 143,
                 "nu_sampling": False, "nu_ref": 1.5,
                 "length_scale_sampling": False, "length_scale_ref": 0.3,
                 "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
@@ -186,21 +204,21 @@ _DEFAULTS: Dict[str, Any] = {
         "pce": {"degree": 3},
         # --- Evaluation ---
         "evaluation": {
-            "test_fraction": 0.2,
-            "n_plot_samples": 5,
+            "test_fraction": 0.1,
+            "n_plot_samples": 10,
         },
     },
     # ---------------------------------------------------------------------------
-    # Phase 3 (reducer): data generation + model + evaluation
+    # Phase 3 (reducer / Model B): data generation + model + evaluation
     # ---------------------------------------------------------------------------
     "phase3": {
         # --- Dataset generation (full-space sampling) ---
-        "n_training_samples": 500,
-        "collocation_n_points": 5,  # canonical path (was: top-level collocation_phase3)
+        "n_training_samples": 5000,
+        "collocation_n_points": 20,  # canonical path (was: top-level collocation_phase3)
         # full_fields defines the full-space coefficient dimension for reducer input
         "full_fields": {
             "E": {
-                "n_terms": 5, "basis": "dct", "seed": 42,
+                "n_terms": 15, "basis": "dct", "seed": 42,
                 "nu_sampling": True, "nu_range": [0.5, 2.5], "nu_ref": 1.5,
                 "length_scale_sampling": True, "length_scale_range": [0.1, 0.5],
                 "length_scale_ref": 0.3,
@@ -215,7 +233,7 @@ _DEFAULTS: Dict[str, Any] = {
                 "mean_sampling": True, "mean_range": [1.0e-13, 1.0e-10],
             },
             "k_v": {
-                "n_terms": 2, "basis": "dct", "seed": 44,
+                "n_terms": 0, "basis": "dct", "seed": 44,
                 "nu_sampling": True, "nu_range": [0.5, 2.5], "nu_ref": 1.5,
                 "length_scale_sampling": True, "length_scale_range": [0.1, 0.5],
                 "length_scale_ref": 0.3,
@@ -223,17 +241,20 @@ _DEFAULTS: Dict[str, Any] = {
                 "mean_sampling": True, "mean_range": [1.0e-13, 1.0e-10],
             },
         },
-        # reduced_fields MUST match phase2.reduced_fields
+        # reduced_fields is ALWAYS synchronised from phase2.reduced_fields
+        # by _sync_reduced_fields().  Do NOT set this manually — it is listed
+        # here only so that the defaults dict is self-consistent; it will be
+        # overwritten at runtime by the phase2 value.
         "reduced_fields": {
             "E": {
-                "n_terms": 3, "basis": "dct", "seed": 142,
+                "n_terms": 8, "basis": "dct", "seed": 142,
                 "nu_sampling": False, "nu_ref": 1.5,
                 "length_scale_sampling": False, "length_scale_ref": 0.3,
                 "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
                 "mean_sampling": True, "mean_range": [5.0e6, 20.0e6],
             },
             "k_h": {
-                "n_terms": 2, "basis": "dct", "seed": 143,
+                "n_terms": 0, "basis": "dct", "seed": 143,
                 "nu_sampling": False, "nu_ref": 1.5,
                 "length_scale_sampling": False, "length_scale_ref": 0.3,
                 "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
@@ -262,8 +283,11 @@ _DEFAULTS: Dict[str, Any] = {
         },
         # --- Evaluation ---
         "evaluation": {
-            "test_fraction": 0.2,
-            "n_plot_samples": 5,
+            "test_fraction": 0.1,
+            "n_plot_samples": 10,
+            # plot_mode: "two_curve"   → GT + reducer→Biot
+            #             "three_curve" → GT + reducer→Biot + reducer→Surrogate
+            "plot_mode": "three_curve",
         },
     },
     # NOTE: collocation_phase2 / collocation_phase3 are DEPRECATED top-level keys.
@@ -327,6 +351,7 @@ class ConfigManager:
             cfg = _deep_merge(cfg, overrides)
 
         self._cfg = self._coerce_numeric_types(cfg)
+        self._sync_reduced_fields()
         self._validate()
 
     # ------------------------------------------------------------------
@@ -563,109 +588,269 @@ class ConfigManager:
                     f"got '{sig}'"
                 )
 
+        # After _sync_reduced_fields, phase2 and phase3 reduced_fields must match.
+        p2_rf = self._cfg["phase2"].get("reduced_fields", {})
+        p3_rf = self._cfg["phase3"].get("reduced_fields", {})
+        for field_name in ("E", "k_h", "k_v"):
+            p2_n = p2_rf.get(field_name, {}).get("n_terms")
+            p3_n = p3_rf.get(field_name, {}).get("n_terms")
+            if p2_n is not None and p3_n is not None and p2_n != p3_n:
+                raise ValueError(
+                    f"phase2.reduced_fields.{field_name}.n_terms ({p2_n}) != "
+                    f"phase3.reduced_fields.{field_name}.n_terms ({p3_n}).  "
+                    "This would cause a dimension mismatch between the reducer output "
+                    "and surrogate input.  _sync_reduced_fields should have fixed this; "
+                    "please report this as a bug."
+                )
+
+    def _sync_reduced_fields(self) -> None:
+        """Enforce that phase3.reduced_fields always equals phase2.reduced_fields.
+
+        This is the single-source-of-truth guarantee: the reducer's output
+        dimension MUST match the surrogate's input dimension.  If any mismatch
+        is detected (e.g. due to stale duplicate config blocks), a UserWarning
+        is emitted and the Phase-2 definition is used for both.
+
+        Call this method *after* ``_coerce_numeric_types`` and *before*
+        ``_validate``.
+        """
+        p2_rf = self._cfg.get("phase2", {}).get("reduced_fields", {})
+        p3_rf = self._cfg.get("phase3", {}).get("reduced_fields", {})
+
+        mismatch_fields = []
+        for field_name in ("E", "k_h", "k_v"):
+            p2_n = p2_rf.get(field_name, {}).get("n_terms")
+            p3_n = p3_rf.get(field_name, {}).get("n_terms")
+            if p2_n is not None and p3_n is not None and p2_n != p3_n:
+                mismatch_fields.append(
+                    f"{field_name}: phase2 n_terms={p2_n}, phase3 n_terms={p3_n}"
+                )
+
+        if mismatch_fields:
+            warnings.warn(
+                "Dimension mismatch detected between phase2.reduced_fields and "
+                "phase3.reduced_fields.  This would cause a broadcast error during "
+                "surrogate decode in Phase-3 evaluation.  Synchronising to the "
+                "Phase-2 definition (single source of truth).\n"
+                "Mismatched fields: " + "; ".join(mismatch_fields) + "\n"
+                "To silence this warning, remove the duplicate 'reduced_fields' block "
+                "from phase3/model_b — it is always derived from phase2/model_a.fields.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        # Always overwrite phase3.reduced_fields with phase2.reduced_fields.
+        if p2_rf:
+            if "phase3" not in self._cfg:
+                self._cfg["phase3"] = {}
+            self._cfg["phase3"]["reduced_fields"] = copy.deepcopy(p2_rf)
+
     # ------------------------------------------------------------------
     # New-format translation + deprecated-key handling
     # ------------------------------------------------------------------
 
     @staticmethod
     def _translate_new_format(cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate ``data_generation``/``models``/``evaluation`` format to
-        the internal ``phase2``/``phase3`` representation.
+        """Translate canonical / intermediate formats to the internal phase2/phase3 layout.
 
-        When the config uses the new structured layout, this method maps each
-        section to the canonical internal key paths so that all downstream code
-        continues to work without changes.  Both formats can coexist; new-format
-        values take precedence over same-path old-format values.
+        Three source formats are handled:
+
+        1. **Canonical** (``model_a`` / ``model_b`` top-level keys) — recommended.
+           ``model_a.fields`` is the single field-dimension definition used by
+           *both* Phase-2 data generation and the surrogate model.
+           ``model_b.fields`` defines full-space fields for the reducer input;
+           the reducer *output* dimension (``phase3.reduced_fields``) is always
+           inherited from ``model_a.fields`` — it cannot be overridden here.
+
+        2. **Intermediate** (``data_generation`` / ``models`` / ``evaluation``) —
+           still accepted.  When both ``data_generation.surrogate.fields`` and
+           ``models.surrogate.reduced_fields`` are present, the
+           ``data_generation`` value takes precedence to avoid silent shadowing.
+
+        3. **Legacy** (``phase2`` / ``phase3``) — passed through unchanged.
         """
+        ma = cfg.get("model_a", {})
+        mb = cfg.get("model_b", {})
         dg = cfg.get("data_generation", {})
         mods = cfg.get("models", {})
         eval_ = cfg.get("evaluation", {})
 
-        if not (dg or mods or eval_):
-            return cfg  # purely old format – nothing to translate
+        has_canonical = bool(ma or mb)
+        has_intermediate = bool(dg or mods or eval_)
+        has_legacy = "phase2" in cfg or "phase3" in cfg
 
-        has_old_format = "phase2" in cfg or "phase3" in cfg
-        if has_old_format:
+        if not (has_canonical or has_intermediate):
+            return cfg  # purely legacy format – pass through unchanged
+
+        if (has_canonical or has_intermediate) and has_legacy:
             warnings.warn(
-                "Config mixes new-format keys (data_generation / models / evaluation) "
-                "with old-format keys (phase2 / phase3).  New-format sections take "
-                "precedence for overlapping settings.",
+                "Config mixes canonical/intermediate keys (model_a / model_b / "
+                "data_generation / models) with legacy keys (phase2 / phase3).  "
+                "Canonical/intermediate sections take precedence for overlapping settings.",
                 UserWarning,
                 stacklevel=5,
             )
 
         result = copy.deepcopy(cfg)
 
-        # ---- Surrogate (phase2) ----
-        dg_surr = dg.get("surrogate", {})
-        m_surr = mods.get("surrogate", {})
-        eval_surr = eval_.get("surrogate", {})
+        # ===================================================================
+        # 1. Canonical format: model_a / model_b
+        # ===================================================================
+        if has_canonical:
+            # ---- Model A (surrogate / phase2) ----
+            if ma:
+                p2 = result.setdefault("phase2", {})
+                # fields is the single canonical definition for both data gen and model
+                if "fields" in ma:
+                    p2["reduced_fields"] = copy.deepcopy(ma["fields"])
+                if "n_samples" in ma:
+                    p2["n_training_samples"] = ma["n_samples"]
+                if "output_dir" in ma:
+                    p2["output_dir"] = ma["output_dir"]
+                if "collocation_n_points" in ma:
+                    p2["collocation_n_points"] = ma["collocation_n_points"]
+                if "type" in ma:
+                    p2["surrogate_type"] = ma["type"]
+                for k in ("output_repr", "training_signal", "hybrid_alpha",
+                          "physics_check_interval", "n_output_modes", "nn", "pce"):
+                    if k in ma:
+                        p2[k] = copy.deepcopy(ma[k])
+                if "evaluation" in ma:
+                    p2["evaluation"] = copy.deepcopy(ma["evaluation"])
 
-        if dg_surr or m_surr or eval_surr:
-            p2 = result.setdefault("phase2", {})
+            # ---- Model B (reducer / phase3) ----
+            if mb:
+                p3 = result.setdefault("phase3", {})
+                # model_b.fields = full-space fields (reducer INPUT)
+                if "fields" in mb:
+                    p3["full_fields"] = copy.deepcopy(mb["fields"])
+                if "n_samples" in mb:
+                    p3["n_training_samples"] = mb["n_samples"]
+                if "output_dir" in mb:
+                    p3["output_dir"] = mb["output_dir"]
+                if "collocation_n_points" in mb:
+                    p3["collocation_n_points"] = mb["collocation_n_points"]
+                if "type" in mb:
+                    p3["reducer_type"] = mb["type"]
+                for k in ("training_signal", "surrogate_dir", "load_phase2_model", "nn"):
+                    if k in mb:
+                        p3[k] = copy.deepcopy(mb[k])
+                if "evaluation" in mb:
+                    p3["evaluation"] = copy.deepcopy(mb["evaluation"])
+                # NOTE: reduced_fields is intentionally NOT read from model_b.
+                # It is always inherited from model_a.fields / phase2.reduced_fields
+                # by _sync_reduced_fields().  Any explicit model_b reduced_fields
+                # would be silently ignored here and overridden later.
+                if "reduced_fields" in mb:
+                    warnings.warn(
+                        "model_b.reduced_fields is ignored.  The reducer output "
+                        "dimension is always derived from model_a.fields to guarantee "
+                        "consistency with the surrogate input dimension.  "
+                        "Remove model_b.reduced_fields from your config.",
+                        UserWarning,
+                        stacklevel=5,
+                    )
 
-            # Data generation
-            if "n_samples" in dg_surr:
-                p2["n_training_samples"] = dg_surr["n_samples"]
-            if "output_dir" in dg_surr:
-                p2.setdefault("output_dir", dg_surr["output_dir"])
-            if "fields" in dg_surr:
-                p2["reduced_fields"] = copy.deepcopy(dg_surr["fields"])
-            if "collocation_n_points" in dg_surr:
-                p2["collocation_n_points"] = dg_surr["collocation_n_points"]
+            # Remove canonical top-level keys
+            for k in ("model_a", "model_b"):
+                result.pop(k, None)
 
-            # Model
-            if "type" in m_surr:
-                p2["surrogate_type"] = m_surr["type"]
-            for k in ("output_repr", "training_signal", "hybrid_alpha",
-                      "physics_check_interval", "n_output_modes",
-                      "output_dir", "reduced_fields", "nn", "pce"):
-                if k in m_surr:
-                    p2[k] = copy.deepcopy(m_surr[k])
+        # ===================================================================
+        # 2. Intermediate format: data_generation / models / evaluation
+        # ===================================================================
+        if has_intermediate:
+            # ---- Surrogate (phase2) ----
+            dg_surr = dg.get("surrogate", {})
+            m_surr = mods.get("surrogate", {})
+            eval_surr = eval_.get("surrogate", {})
 
-            # Evaluation
-            if eval_surr:
-                p2["evaluation"] = copy.deepcopy(eval_surr)
+            if dg_surr or m_surr or eval_surr:
+                p2 = result.setdefault("phase2", {})
 
-        # ---- Reducer (phase3) ----
-        dg_red = dg.get("reducer", {})
-        m_red = mods.get("reducer", {})
-        eval_red = eval_.get("reducer", {})
+                # data_generation.surrogate settings (take precedence over models.surrogate
+                # for reduced_fields to avoid silent shadowing)
+                if "n_samples" in dg_surr:
+                    p2["n_training_samples"] = dg_surr["n_samples"]
+                if "output_dir" in dg_surr:
+                    p2.setdefault("output_dir", dg_surr["output_dir"])
+                if "collocation_n_points" in dg_surr:
+                    p2["collocation_n_points"] = dg_surr["collocation_n_points"]
+                # Stash data_generation.surrogate.fields before processing the model section,
+                # so we can apply it AFTER models.surrogate.reduced_fields (last write wins).
+                # This ensures data_generation always takes precedence over models.surrogate.
+                dg_fields = copy.deepcopy(dg_surr["fields"]) if "fields" in dg_surr else None
 
-        if dg_red or m_red or eval_red:
-            p3 = result.setdefault("phase3", {})
+                # models.surrogate settings (non-field keys only, to avoid shadowing)
+                if "type" in m_surr:
+                    p2["surrogate_type"] = m_surr["type"]
+                for k in ("output_repr", "training_signal", "hybrid_alpha",
+                          "physics_check_interval", "n_output_modes",
+                          "output_dir", "nn", "pce"):
+                    if k in m_surr:
+                        p2[k] = copy.deepcopy(m_surr[k])
+                # models.surrogate.reduced_fields is accepted but will be overridden
+                # by data_generation.surrogate.fields if the latter is present.
+                if "reduced_fields" in m_surr:
+                    p2["reduced_fields"] = copy.deepcopy(m_surr["reduced_fields"])
 
-            # Data generation
-            if "n_samples" in dg_red:
-                p3["n_training_samples"] = dg_red["n_samples"]
-            if "output_dir" in dg_red:
-                p3.setdefault("output_dir", dg_red["output_dir"])
-            if "fields" in dg_red:
-                p3["full_fields"] = copy.deepcopy(dg_red["fields"])
-            if "collocation_n_points" in dg_red:
-                p3["collocation_n_points"] = dg_red["collocation_n_points"]
+                # data_generation.surrogate.fields wins over models.surrogate.reduced_fields
+                if dg_fields is not None:
+                    if "reduced_fields" in p2 and p2["reduced_fields"] != dg_fields:
+                        warnings.warn(
+                            "Both data_generation.surrogate.fields and "
+                            "models.surrogate.reduced_fields are defined but differ.  "
+                            "data_generation.surrogate.fields takes precedence.  "
+                            "Remove the duplicate models.surrogate.reduced_fields block.",
+                            UserWarning,
+                            stacklevel=5,
+                        )
+                    p2["reduced_fields"] = dg_fields
 
-            # Model
-            if "type" in m_red:
-                p3["reducer_type"] = m_red["type"]
-            for k in ("training_signal", "output_dir", "surrogate_dir",
-                      "load_phase2_model", "reduced_fields", "nn"):
-                if k in m_red:
-                    p3[k] = copy.deepcopy(m_red[k])
+                if eval_surr:
+                    p2["evaluation"] = copy.deepcopy(eval_surr)
 
-            # Inherit reduced_fields from surrogate if not specified in reducer
-            if "reduced_fields" not in m_red and "surrogate" in mods:
-                surr_rf = mods["surrogate"].get("reduced_fields")
-                if surr_rf:
-                    p3.setdefault("reduced_fields", copy.deepcopy(surr_rf))
+            # ---- Reducer (phase3) ----
+            dg_red = dg.get("reducer", {})
+            m_red = mods.get("reducer", {})
+            eval_red = eval_.get("reducer", {})
 
-            # Evaluation
-            if eval_red:
-                p3["evaluation"] = copy.deepcopy(eval_red)
+            if dg_red or m_red or eval_red:
+                p3 = result.setdefault("phase3", {})
 
-        # Remove translated top-level keys to avoid confusion
-        for k in ("data_generation", "models", "evaluation"):
-            result.pop(k, None)
+                if "n_samples" in dg_red:
+                    p3["n_training_samples"] = dg_red["n_samples"]
+                if "output_dir" in dg_red:
+                    p3.setdefault("output_dir", dg_red["output_dir"])
+                if "fields" in dg_red:
+                    p3["full_fields"] = copy.deepcopy(dg_red["fields"])
+                if "collocation_n_points" in dg_red:
+                    p3["collocation_n_points"] = dg_red["collocation_n_points"]
+
+                if "type" in m_red:
+                    p3["reducer_type"] = m_red["type"]
+                for k in ("training_signal", "output_dir", "surrogate_dir",
+                          "load_phase2_model", "nn"):
+                    if k in m_red:
+                        p3[k] = copy.deepcopy(m_red[k])
+
+                # models.reducer.reduced_fields is accepted but will be overridden
+                # by _sync_reduced_fields(); emit a warning to inform the user.
+                if "reduced_fields" in m_red:
+                    warnings.warn(
+                        "models.reducer.reduced_fields is defined but will be "
+                        "overridden to match phase2.reduced_fields (single source "
+                        "of truth).  Remove this block to silence the warning.",
+                        UserWarning,
+                        stacklevel=5,
+                    )
+                    p3["reduced_fields"] = copy.deepcopy(m_red["reduced_fields"])
+
+                if eval_red:
+                    p3["evaluation"] = copy.deepcopy(eval_red)
+
+            # Remove intermediate top-level keys to avoid confusion
+            for k in ("data_generation", "models", "evaluation"):
+                result.pop(k, None)
 
         return result
 

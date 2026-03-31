@@ -4,12 +4,36 @@ All configuration parameters for PI-DimRe4RFs-FieldReducer-v2.
 
 ## Config formats
 
-Two YAML layouts are supported:
+Three YAML layouts are supported (all translated internally to `phase2`/`phase3`):
 
-**New format** (recommended):
+**Canonical format** (recommended — single source of truth per model):
 ```yaml
 grid: ...
 solver: ...
+model_a:              # Model A — surrogate (reduced params → settlement)
+  fields: ...         # SINGLE canonical field definition: controls both
+                      # dataset generation AND the surrogate input dimension
+  n_samples: 2000
+  output_dir: "models/phase2_surrogate"
+  type: "nn"
+  nn: { ... }
+  evaluation: { test_fraction: 0.1, n_plot_samples: 10 }
+model_b:              # Model B — reducer (full params → reduced params)
+  fields: ...         # Full-space fields for reducer INPUT (dataset gen only)
+                      # Reducer OUTPUT dimension = model_a.fields dimensions (auto)
+  n_samples: 5000
+  output_dir: "models/phase3_reducer"
+  nn: { ... }
+  evaluation: { plot_mode: "three_curve", ... }
+```
+
+**Key design rule**: `model_a.fields` controls **both** dataset generation and the
+surrogate's input dimension.  The reducer's output dimension is **always derived
+automatically** from `model_a.fields` — you never need to specify it separately.
+This eliminates the shadowing / mismatch problem.
+
+**Intermediate format** (still accepted):
+```yaml
 data_generation:
   surrogate: ...    # dataset-generation params for Model A (surrogate)
   reducer: ...      # dataset-generation params for Model B (reducer)
@@ -21,16 +45,23 @@ evaluation:
   reducer: ...
 ```
 
+When both `data_generation.surrogate.fields` and `models.surrogate.reduced_fields`
+are present, `data_generation.surrogate.fields` takes precedence.
+
 **Legacy format** (still supported, no breaking change):
 ```yaml
 phase2: ...      # merged surrogate data-gen + model config
 phase3: ...      # merged reducer data-gen + model config
-collocation_phase2: ...   # DEPRECATED → use data_generation.surrogate.collocation_n_points
-collocation_phase3: ...   # DEPRECATED → use data_generation.reducer.collocation_n_points
+collocation_phase2: ...   # DEPRECATED → phase2.collocation_n_points
+collocation_phase3: ...   # DEPRECATED → phase3.collocation_n_points
 ```
 
-The new format is translated to the internal `phase2`/`phase3` representation
-automatically; all downstream code is unaffected.
+### Single-source-of-truth enforcement
+
+Regardless of format, `phase3.reduced_fields` is **always synchronised** to equal
+`phase2.reduced_fields` at runtime (in `_sync_reduced_fields()`).  If a mismatch
+is detected (e.g. stale duplicate config blocks), a `UserWarning` is emitted and
+the Phase-2 value wins.  This prevents the reducer→surrogate broadcast error.
 
 ---
 
@@ -45,12 +76,10 @@ automatically; all downstream code is unaffected.
 
 ---
 
-## `random_fields` — Material Random Field Definitions (base template)
+## `random_fields` — Material Random Field Definitions (Phase-1 only)
 
-Base field definitions used across the pipeline (Phase 1, and as the structural
-template for `data_generation.surrogate.fields` and `data_generation.reducer.fields`).
-Each phase-specific field block may add `mean_sampling`/`mean_range` on top of these
-shared keys.
+Base field definitions used by Phase 1 only.  For Phase 2 and Phase 3, use
+`model_a.fields` / `model_b.fields` (or `data_generation.surrogate/reducer.fields`).
 
 All three fields (`E`, `k_h`, `k_v`) share the same 2D DCT-II basis and differ only in the parameters below.
 
@@ -108,94 +137,84 @@ Physical mapping: `k(x) = 10^(k_mid + ξ · Φ · k_scale)` where `k_mid = (log�
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `type` | str | `"1d"` | Solver dimensionality: `"1d"` or `"2d"`. |
-| `mode` | str | `"steady"` | Time regime: `"steady"` or `"transient"`. |
+| `type` | str | `"2d"` | Solver dimensionality: `"1d"` or `"2d"`. |
+| `mode` | str | `"steady"` | Time regime: `"steady"` or `"transient"`. Setting `"transient"` emits a UserWarning (transient pipeline not yet implemented). |
 | `nu_biot` | float | `0.3` | Poisson's ratio. |
 | `fluid_viscosity` | float | `1e-3` | Fluid dynamic viscosity [Pa·s]. |
 | `fluid_compressibility` | float | `4.5e-10` | Fluid compressibility [1/Pa]. |
-| `load` | float | `1e4` | Applied surface load [Pa]. |
+| `load` | float | `1e6` | Applied surface load [Pa]. |
 | `transient.dt` | float | `0.01` | Time step [s] (transient mode only). |
 | `transient.n_steps` | int | `100` | Number of time steps (transient mode only). |
 
 ---
 
-## `data_generation` — Dataset Generation for Both Models
+## `model_a` — Surrogate (Model A, reduced params → settlement)
 
-### `data_generation.surrogate` — Surrogate Training Data (reduced-space)
+### `model_a.fields` — Canonical field definitions (SINGLE SOURCE OF TRUTH)
+
+Same key schema as `random_fields`.  These settings control:
+1. The **reduced-space coefficient dimension** (n_terms per field, each contributing
+   max(n_terms, 1) parameters).
+2. **Dataset generation** sampling for Phase 2 training data.
+3. The **surrogate model's input dimension** (= sum of effective dims).
+4. The **reducer model's output dimension** (inherited automatically).
+
+Do **not** duplicate these in `models.surrogate.reduced_fields` or `model_b`
+— they are the single canonical definition.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `n_samples` | int | `200` | Number of reduced-space training samples. |
-| `output_dir` | str | `"data/phase2"` | Directory for surrogate training data. |
+| `n_samples` | int | `2000` | Number of reduced-space training samples. |
+| `output_dir` | str | `"models/phase2_surrogate"` | Directory for training data + model artefacts. |
 | `collocation_n_points` | int | `20` | Collocation points for physics regularisation. |
-| `fields` | dict | See defaults | Per-field configs for reduced-space sampling. Each field supports all keys from `random_fields` plus `mean_sampling`/`mean_range`. |
-
-### `data_generation.reducer` — Reducer Training Data (full-space)
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `n_samples` | int | `500` | Number of full-space training samples. |
-| `output_dir` | str | `"data/phase3"` | Directory for reducer training data. |
-| `collocation_n_points` | int | `5` | Collocation points for physics regularisation. |
-| `fields` | dict | See defaults | Per-field configs for full-space sampling. |
-
----
-
-## `models` — Model Architecture and Training
-
-### `models.surrogate` — Surrogate (Model A)
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
 | `type` | str | `"nn"` | `"nn"` or `"pce"`. |
-| `output_repr` | str | `"direct"` | Output representation: `"direct"`, `"dct"`, `"poly"`, `"bspline"`. |
-| `n_output_modes` | int | `10` | Modes for `dct`/`poly`/`bspline` representations. |
+| `output_repr` | str | `"direct"` | `"direct"`, `"dct"`, `"poly"`, `"bspline"`. |
+| `n_output_modes` | int | `10` | Modes for `dct`/`poly`/`bspline` output representations. |
 | `training_signal` | str | `"hybrid"` | `"data"`, `"physics"`, or `"hybrid"`. |
 | `hybrid_alpha` | float | `0.1` | Physics weight in hybrid mode. |
 | `physics_check_interval` | int | `10` | Run Biot check every N epochs (hybrid/physics). |
-| `output_dir` | str | `"models/phase2_surrogate"` | Directory for surrogate artefacts. |
-| `reduced_fields` | dict | See defaults | Per-field dimensionality config (n_terms defines input dim). |
+| `nn` | dict | see defaults | NN hyperparams: `hidden_dims`, `epochs`, `lr`, `batch_size`, `patience`. |
+| `pce` | dict | `{degree: 3}` | PCE hyperparams. |
 
-#### `models.surrogate.nn` / `models.surrogate.pce`
-
-Same as legacy `phase2.nn` / `phase2.pce`.
-
-### `models.reducer` — Reducer (Model B)
+#### `model_a.evaluation`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `type` | str | `"nn"` | Currently only `"nn"`. |
-| `training_signal` | str | `"surrogate"` | `"surrogate"` or `"physics"`. |
-| `output_dir` | str | `"models/phase3_reducer"` | Directory for reducer artefacts. |
-| `surrogate_dir` | str | `"models/phase2_surrogate"` | Path to load Phase-2 surrogate. |
-| `load_phase2_model` | str or null | `null` | Path to a specific `.pt` file; overrides auto-detection. |
-| `reduced_fields` | dict or null | inherited from `models.surrogate.reduced_fields` | If omitted, inherited from the surrogate model config. |
+| `test_fraction` | float | `0.1` | Fraction of data used for evaluation. |
+| `n_plot_samples` | int | `10` | Number of samples shown in comparison plots. |
 
 ---
 
-## `evaluation` — Evaluation and Plotting
+## `model_b` — Reducer (Model B, full params → reduced params)
 
-### `evaluation.surrogate`
+### `model_b.fields` — Full-space field definitions
+
+Controls the reducer **input** space (full-dimensional fields).  Same key schema
+as `random_fields`.  The reducer **output** dimension is automatically derived from
+`model_a.fields` — do not set a `reduced_fields` key here.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `test_fraction` | float | `0.2` | Fraction of data used for evaluation. |
-| `n_plot_samples` | int | `5` | Number of samples shown in comparison plots. |
+| `n_samples` | int | `5000` | Number of full-space training samples. |
+| `output_dir` | str | `"models/phase3_reducer"` | Directory for training data + model artefacts. |
+| `collocation_n_points` | int | `20` | Collocation points for physics regularisation. |
+| `surrogate_dir` | str | `"models/phase2_surrogate"` | Path to load the Phase-2 surrogate. |
+| `load_phase2_model` | str or null | `null` | Path to a specific `.pt` file; overrides auto-detection. |
+| `type` | str | `"nn"` | Currently only `"nn"`. |
+| `training_signal` | str | `"surrogate"` | `"surrogate"` or `"physics"`. |
+| `nn` | dict | see defaults | NN hyperparams: `hidden_dims`, `epochs`, `lr`, `batch_size`, `patience`. |
 
-### `evaluation.reducer`
+#### `model_b.evaluation`
 
-Same keys as `evaluation.surrogate`.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `test_fraction` | float | `0.1` | Fraction of data used for evaluation. |
+| `n_plot_samples` | int | `10` | Number of samples shown in comparison plots. |
+| `plot_mode` | str | `"three_curve"` | Settlement comparison figure: `"two_curve"` (GT + Biot) or `"three_curve"` (GT + Biot + Surrogate). |
 
-**Settlement comparison plots** use per-sample y-axis: each subplot has its own
-`[0, y_max_sample]` range, making it easy to compare profiles at different scales.
-
-**Phase-3 settlement plot** shows three curves per sample:
-1. Ground truth (full-field Biot)
-2. Reducer → reduced fields → Biot (**primary evaluation**)
-3. Reducer → reduced params → surrogate (**diagnostic only**)
-
-Metrics for curves 2 and 3 are both written to `metrics.json`, with curve-3
-metrics namespaced under `surrogate_*` keys.
+**`plot_mode` details**:
+- `"two_curve"`: Plots ground truth (GT) and reducer→Biot path.  Always available.
+- `"three_curve"`: Adds the reducer→Surrogate path as a third curve.  Requires a trained Phase-2 surrogate to be passed to `Phase3Evaluator.run()`.
 
 ---
 
@@ -205,7 +224,9 @@ metrics namespaced under `surrogate_*` keys.
 |-----|------|---------|-------------|
 | `n_test_samples` | int | `50` | Samples from Phase-1 validation set used for evaluation. |
 | `output_dir` | str | `"results"` | Directory for metrics and plots. |
-| `use_physics_for_plots` | bool | `false` | If `true`, bypass surrogate and use direct solver for ground-truth plots. |
+| `use_physics_for_plots` | bool | `true` | If `true`, bypass surrogate and use direct solver for ground-truth plots. |
+| `random_seed` | int | `0` | Seed for reproducible random sampling of test set. Change to get a different set of test samples. |
+| `shuffle` | bool | `true` | If `true`, randomise sample order using `random_seed`. If `false`, take first `n_test_samples` in order. |
 
 ---
 
@@ -213,10 +234,14 @@ metrics namespaced under `surrogate_*` keys.
 
 | Deprecated key | Canonical replacement | Status |
 |---|---|---|
-| `collocation_phase2.n_points` | `data_generation.surrogate.collocation_n_points` | DeprecationWarning emitted; still accepted |
-| `collocation_phase3.n_points` | `data_generation.reducer.collocation_n_points` | DeprecationWarning emitted; still accepted |
-| `phase2.*` | `data_generation.surrogate.*` / `models.surrogate.*` | Still accepted (old format) |
-| `phase3.*` | `data_generation.reducer.*` / `models.reducer.*` | Still accepted (old format) |
+| `collocation_phase2.n_points` | `model_a.collocation_n_points` | DeprecationWarning; still accepted |
+| `collocation_phase3.n_points` | `model_b.collocation_n_points` | DeprecationWarning; still accepted |
+| `data_generation.surrogate.*` | `model_a.*` | Intermediate format; still accepted |
+| `data_generation.reducer.*` | `model_b.*` | Intermediate format; still accepted |
+| `models.surrogate.*` | `model_a.*` | Intermediate format; still accepted |
+| `models.reducer.*` | `model_b.*` | Intermediate format; still accepted |
+| `phase2.*` | `model_a.*` | Legacy format; still accepted |
+| `phase3.*` | `model_b.*` | Legacy format; still accepted |
 
 ---
 
@@ -235,7 +260,7 @@ metrics namespaced under `surrogate_*` keys.
 
 | Value | Used in | Description |
 |-------|---------|-------------|
-| `"data"` | Phase 2 | Pure data-driven: fit surrogate to (X, Y). |
-| `"physics"` | Phase 2, 3 | Direct Biot solver evaluations (accurate, slow). |
-| `"surrogate"` | Phase 3 | Use Phase-2 surrogate as a differentiable oracle. |
-| `"hybrid"` | Phase 2, 3 | Weighted combination: `α * physics + (1-α) * surrogate/data`. |
+| `"data"` | Model A | Pure data-driven: fit surrogate to (X, Y). |
+| `"physics"` | Model A, B | Direct Biot solver evaluations (accurate, slow). |
+| `"surrogate"` | Model B | Use Phase-2 surrogate as a differentiable oracle. |
+| `"hybrid"` | Model A, B | Weighted combination: `α * physics + (1-α) * surrogate/data`. |
