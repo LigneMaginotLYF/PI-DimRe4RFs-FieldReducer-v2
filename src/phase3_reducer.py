@@ -140,6 +140,11 @@ class Phase3Reducer:
     def field_manager_reduced(self) -> FieldManager:
         return self._fm_reduced
 
+    @property
+    def surrogate(self) -> Optional[BaseSurrogate]:
+        """Phase-2 surrogate loaded during training, or None if not available."""
+        return self._surrogate
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

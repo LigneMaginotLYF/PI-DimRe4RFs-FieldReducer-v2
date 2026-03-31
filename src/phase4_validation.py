@@ -78,6 +78,25 @@ class Phase4Validator:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._plots_dir.mkdir(parents=True, exist_ok=True)
 
+        # Apply seed-controlled sampling / shuffling
+        p4_cfg = self._cfg.get("phase4", {})
+        n_test_samples: int = int(p4_cfg.get("n_test_samples", 50))
+        random_seed = p4_cfg.get("random_seed", 0)
+        shuffle: bool = bool(p4_cfg.get("shuffle", True))
+
+        rng = np.random.default_rng(int(random_seed))
+        n_available = len(X_test)
+
+        if shuffle:
+            perm = rng.permutation(n_available)
+        else:
+            perm = np.arange(n_available)
+
+        n_take = min(n_test_samples, n_available)
+        idx = perm[:n_take]
+        X_test = X_test[idx]
+        Y_test = Y_test[idx]
+
         # Load surrogate
         surr_dir = Path(self._cfg["phase3"]["surrogate_dir"]) / "surrogate"
         if surr_dir.exists():

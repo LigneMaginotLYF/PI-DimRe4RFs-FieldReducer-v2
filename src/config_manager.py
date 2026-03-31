@@ -276,6 +276,8 @@ _DEFAULTS: Dict[str, Any] = {
         "n_test_samples": 50,
         "output_dir": "results",
         "use_physics_for_plots": False,
+        "random_seed": 0,
+        "shuffle": True,
     },
 }
 
@@ -356,6 +358,37 @@ class ConfigManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding='utf-8') as f:
             yaml.safe_dump(self._cfg, f, default_flow_style=False)
+
+    def warn_if_transient_mode(self) -> None:
+        """Emit a prominent warning when ``solver.mode`` is 'transient'.
+
+        The current two-model pipeline (surrogate + reducer) targets steady-state
+        Biot consolidation.  Transient mode changes the forward solver internally
+        but the training and evaluation pipelines are **not** wired for time-series
+        data end-to-end.
+
+        Call this method at the **start** of every training and validation entry
+        point (before any pipeline execution begins) so the user is immediately
+        informed of the limitation.  It is a no-op when ``solver.mode`` is
+        'steady' (default).
+        """
+        mode = self._cfg.get("solver", {}).get("mode", "steady")
+        if mode == "transient":
+            warnings.warn(
+                "\n"
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║  TRANSIENT MODE WARNING                                      ║\n"
+                "║  solver.mode = 'transient' is set, but the current pipeline  ║\n"
+                "║  (surrogate + reducer) is designed for STEADY-STATE Biot     ║\n"
+                "║  consolidation only.  Transient-aware training, loss terms,  ║\n"
+                "║  and time-series evaluation are NOT yet implemented end-to-  ║\n"
+                "║  end.  Your run will proceed with steady-style behaviour;    ║\n"
+                "║  transient dt / n_steps settings are forwarded to the solver ║\n"
+                "║  but have no effect on surrogate or reducer training.        ║\n"
+                "╚══════════════════════════════════════════════════════════════╝",
+                UserWarning,
+                stacklevel=2,
+            )
 
     # ------------------------------------------------------------------
     # Convenience helpers

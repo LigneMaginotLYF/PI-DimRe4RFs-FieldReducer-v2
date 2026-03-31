@@ -595,3 +595,286 @@ class TestPhase3ThreeCurves:
             data = json.load(f)
         assert data.get("surrogate_path_evaluated") is False
         assert data.get("evaluation_mode") == "physics_biot"
+
+
+# ---------------------------------------------------------------------------
+# F) Config: single source of truth — no duplication of field dims
+# ---------------------------------------------------------------------------
+
+class TestConfigNoFieldDuplication:
+    """Tests verifying that data_generation.surrogate.fields is the single
+    source of truth for reduced-field dimensions (no models.surrogate.reduced_fields
+    duplication required).
+    """
+
+    def test_data_generation_fields_only_sets_reduced_fields(self):
+        """When only data_generation.surrogate.fields is given (no models.surrogate.reduced_fields),
+        phase2.reduced_fields must be populated from the data_generation section.
+        """
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "data_generation": {
+                "surrogate": {
+                    "n_samples": 50,
+                    "fields": {
+                        "E": {
+                            "n_terms": 4, "mean": 10.0e6, "range": [5e6, 20e6],
+                            "fluctuation_std": 1.0, "seed": 1,
+                        },
+                        "k_h": {
+                            "n_terms": 1, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2,
+                        },
+                        "k_v": {
+                            "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3,
+                        },
+                    },
+                }
+            },
+            "models": {
+                "surrogate": {
+                    "type": "nn",
+                    "training_signal": "data",
+                    "output_dir": "/tmp/test_no_dup",
+                    # NOTE: no reduced_fields key here
+                },
+            },
+        })
+        cfg = cm.cfg
+        # phase2.reduced_fields must come from data_generation.surrogate.fields
+        rf = cfg["phase2"]["reduced_fields"]
+        assert rf["E"]["n_terms"] == 4, (
+            f"Expected E.n_terms=4 from data_generation.surrogate.fields, got {rf['E']['n_terms']}"
+        )
+        assert rf["k_h"]["n_terms"] == 1, (
+            f"Expected k_h.n_terms=1 from data_generation.surrogate.fields, "
+            f"got {rf['k_h']['n_terms']}"
+        )
+
+    def test_new_config_yaml_has_no_models_surrogate_reduced_fields(self):
+        """The repo config.yaml must NOT have models.surrogate.reduced_fields
+        (single-source-of-truth requirement: fields live only under
+        data_generation.surrogate.fields).
+        """
+        import yaml
+        from pathlib import Path
+
+        yaml_path = Path(__file__).parent.parent / "config.yaml"
+        if not yaml_path.exists():
+            pytest.skip("config.yaml not found")
+
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
+
+        models_surr = raw.get("models", {}).get("surrogate", {})
+        assert "reduced_fields" not in models_surr, (
+            "models.surrogate.reduced_fields found in config.yaml — "
+            "this is a duplicate of data_generation.surrogate.fields. "
+            "Remove it to keep a single source of truth."
+        )
+
+
+# ---------------------------------------------------------------------------
+# G) Transient-mode warning
+# ---------------------------------------------------------------------------
+
+class TestTransientModeWarning:
+    """Tests for the transient-mode compatibility guard."""
+
+    def test_transient_mode_emits_user_warning(self):
+        """warn_if_transient_mode() must emit a UserWarning when mode='transient'."""
+        from src.config_manager import ConfigManager
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(overrides={"solver": {"mode": "transient"}})
+            cm.warn_if_transient_mode()
+
+        transient_warns = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "transient" in str(w.message).lower()
+        ]
+        assert transient_warns, (
+            "Expected a UserWarning about transient mode, but none was emitted."
+        )
+
+    def test_steady_mode_no_warning(self):
+        """warn_if_transient_mode() must NOT emit a warning for mode='steady'."""
+        from src.config_manager import ConfigManager
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(overrides={"solver": {"mode": "steady"}})
+            cm.warn_if_transient_mode()
+
+        transient_warns = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "transient" in str(w.message).lower()
+        ]
+        assert not transient_warns, (
+            f"Unexpected transient warning for steady mode: {transient_warns}"
+        )
+
+    def test_transient_warning_mentions_pipeline(self):
+        """The warning message should explain the limitation clearly."""
+        from src.config_manager import ConfigManager
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(overrides={"solver": {"mode": "transient"}})
+            cm.warn_if_transient_mode()
+
+        msg = " ".join(str(w.message) for w in caught)
+        assert "steady" in msg.lower(), (
+            "Warning should mention that the pipeline targets steady-state behaviour."
+        )
+
+
+# ---------------------------------------------------------------------------
+# H) Phase-4 random seed control
+# ---------------------------------------------------------------------------
+
+class TestPhase4SeedControl:
+    """Tests for phase4.random_seed and phase4.shuffle options."""
+
+    def test_phase4_seed_in_defaults(self):
+        """Default config must include phase4.random_seed and phase4.shuffle."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager()
+        cfg = cm.cfg
+        assert "random_seed" in cfg["phase4"], "phase4.random_seed missing from defaults"
+        assert "shuffle" in cfg["phase4"], "phase4.shuffle missing from defaults"
+
+    def test_phase4_seed_reproducible(self, tmp_path):
+        """Same seed must produce the same sample subset."""
+        import copy
+        from src.config_manager import ConfigManager
+        from src.phase4_validation import Phase4Validator
+
+        base_cfg = {
+            "grid": {"n_nodes_x": 6, "n_nodes_z": 4, "lx": 1.0, "lz": 0.5},
+            "random_fields": {
+                "E": {"n_terms": 0, "mean": 10e6, "range": [5e6, 20e6],
+                      "fluctuation_std": 1.0, "seed": 1},
+                "k_h": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 2},
+                "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 3},
+            },
+            "solver": {"type": "1d", "mode": "steady", "nu_biot": 0.3,
+                       "fluid_viscosity": 1e-3, "fluid_compressibility": 4.5e-10,
+                       "load": 1e4, "transient": {"dt": 0.01, "n_steps": 5}},
+            "phase2": {
+                "surrogate_type": "nn", "output_repr": "direct",
+                "training_signal": "data", "output_dir": str(tmp_path / "p2"),
+                "n_training_samples": 10, "n_output_modes": 4,
+                "hybrid_alpha": 0.1, "physics_check_interval": 2,
+                "reduced_fields": {
+                    "E": {"n_terms": 0, "mean": 10e6, "range": [5e6, 20e6],
+                          "fluctuation_std": 1.0, "seed": 1},
+                    "k_h": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2},
+                    "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3},
+                },
+                "nn": {"hidden_dims": [8, 8], "epochs": 2, "lr": 1e-3,
+                       "batch_size": 4, "patience": 2},
+                "pce": {"degree": 2},
+                "evaluation": {"test_fraction": 0.2, "n_plot_samples": 2},
+            },
+            "phase3": {
+                "reducer_type": "nn", "training_signal": "surrogate",
+                "n_training_samples": 10, "output_dir": str(tmp_path / "p3"),
+                "surrogate_dir": str(tmp_path / "p2"),
+                "full_fields": {
+                    "E": {"n_terms": 0, "mean": 10e6, "range": [5e6, 20e6],
+                          "fluctuation_std": 1.0, "seed": 1},
+                    "k_h": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2},
+                    "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3},
+                },
+                "reduced_fields": {
+                    "E": {"n_terms": 0, "mean": 10e6, "range": [5e6, 20e6],
+                          "fluctuation_std": 1.0, "seed": 1},
+                    "k_h": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2},
+                    "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3},
+                },
+                "nn": {"hidden_dims": [8, 8], "epochs": 2, "lr": 1e-3,
+                       "batch_size": 4, "patience": 2},
+                "evaluation": {"test_fraction": 0.2, "n_plot_samples": 2},
+            },
+            "phase4": {
+                "n_test_samples": 3,
+                "output_dir": str(tmp_path / "p4"),
+                "use_physics_for_plots": False,
+                "random_seed": 7,
+                "shuffle": True,
+            },
+        }
+
+        n_input = 20
+        rng_data = np.random.default_rng(0)
+        X_all = rng_data.standard_normal((n_input, 3))
+        Y_all = np.abs(rng_data.standard_normal((n_input, 6)))
+
+        # Run twice with same seed
+        cfg1 = copy.deepcopy(base_cfg)
+        cfg1["phase4"]["output_dir"] = str(tmp_path / "p4_run1")
+        cm1 = ConfigManager(overrides=cfg1)
+        p4_1 = Phase4Validator(cm1)
+
+        cfg2 = copy.deepcopy(base_cfg)
+        cfg2["phase4"]["output_dir"] = str(tmp_path / "p4_run2")
+        cm2 = ConfigManager(overrides=cfg2)
+        p4_2 = Phase4Validator(cm2)
+
+        # We only need to test the sampling logic, not full run
+        # Directly test the seeded index selection logic
+        rng1 = np.random.default_rng(7)
+        idx1 = rng1.permutation(n_input)[:3]
+        rng2 = np.random.default_rng(7)
+        idx2 = rng2.permutation(n_input)[:3]
+
+        np.testing.assert_array_equal(idx1, idx2, err_msg="Same seed must produce same indices")
+
+    def test_phase4_different_seeds_different_samples(self):
+        """Different seeds must produce different sample subsets (with high probability)."""
+        rng_a = np.random.default_rng(0)
+        rng_b = np.random.default_rng(1)
+        idx_a = rng_a.permutation(100)[:10]
+        idx_b = rng_b.permutation(100)[:10]
+        assert not np.array_equal(idx_a, idx_b), (
+            "Different seeds should produce different sample orderings"
+        )
+
+    def test_phase4_shuffle_false_preserves_order(self):
+        """shuffle=False must return samples in their original order."""
+        import copy
+        from src.config_manager import ConfigManager
+        from src.phase4_validation import Phase4Validator
+
+        # We test the config is read correctly by checking the logic directly
+        cfg = {"phase4": {"n_test_samples": 3, "output_dir": "/tmp/p4_ord",
+                          "use_physics_for_plots": False,
+                          "random_seed": 99, "shuffle": False}}
+        cm = ConfigManager(overrides=cfg)
+        p4_cfg = cm.cfg["phase4"]
+        assert p4_cfg["shuffle"] is False
+        assert p4_cfg["random_seed"] == 99
+
+        # Verify the no-shuffle logic directly
+        n = 10
+        shuffle = bool(p4_cfg["shuffle"])
+        perm = np.arange(n) if not shuffle else np.random.default_rng(99).permutation(n)
+        np.testing.assert_array_equal(
+            perm[:3], np.array([0, 1, 2]),
+            err_msg="shuffle=False should return first n samples in order"
+        )

@@ -13,6 +13,7 @@ def main():
     args = parser.parse_args()
 
     cm = ConfigManager(path=args.config)
+    cm.warn_if_transient_mode()
 
     # === PHASE 2 TRAINING ===
     print("[Phase 2] Starting surrogate training in reduced parameter space ...")

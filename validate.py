@@ -13,6 +13,7 @@ def main():
     args = parser.parse_args()
 
     cm = ConfigManager(path=args.config)
+    cm.warn_if_transient_mode()
 
     # Load validation data from Phase 1
     p1 = Phase1DatasetGenerator(cm)
