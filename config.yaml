@@ -19,6 +19,10 @@
 #                    The reducer OUTPUT dimension (reduced space) is ALWAYS derived
 #                    from model_a.fields — do NOT duplicate it in model_b.
 #
+# Phase 1 (full-space dataset / random_fields) is optional and only needed when
+# running the legacy Phase-1 data-generation path.  Remove those sections
+# entirely for a clean two-model pipeline.
+#
 # ─── MIGRATION NOTE ────────────────────────────────────────────────────────────
 # data_generation.surrogate / models.surrogate → model_a
 # data_generation.reducer   / models.reducer   → model_b
@@ -48,69 +52,6 @@ solver:
   transient:
     dt: 0.01
     n_steps: 100
-
-# -----------------------------------------------------------
-# Phase 1: full-space dataset generation (legacy path)
-# -----------------------------------------------------------
-phase1:
-  n_samples: 2000
-  val_fraction: 0.2
-  output_dir: "data"
-
-# -----------------------------------------------------------
-# Random field definitions for Phase-1 data generation
-# (full-space fields; used only by Phase 1)
-# -----------------------------------------------------------
-random_fields:
-  E:
-    n_terms: 15
-    basis: "dct"
-    seed: 42
-    covariance: "matern"
-    nu_sampling: true
-    nu_range: [0.5, 2.5]
-    nu_ref: 1.5
-    length_scale_sampling: true
-    length_scale_range: [0.1, 0.5]
-    length_scale_ref: 0.3
-    mean: 10.0e6
-    range: [5.0e6, 20.0e6]
-    fluctuation_std: 1.0
-    force_identity_reduction: false
-    mean_sampling: true
-    mean_range: [5.0e6, 20.0e6]
-  k_h:
-    n_terms: 0
-    basis: "dct"
-    seed: 43
-    covariance: "matern"
-    nu_sampling: false
-    nu_ref: 1.5
-    length_scale_sampling: false
-    length_scale_ref: 0.3
-    mean: 1.0e-12
-    range: [1.0e-13, 1.0e-10]
-    fluctuation_std: 0.5
-    force_identity_reduction: false
-    mean_sampling: true
-    mean_range: [1.0e-13, 1.0e-10]
-  k_v:
-    n_terms: 0
-    basis: "dct"
-    seed: 44
-    covariance: "matern"
-    nu_sampling: true
-    nu_range: [0.5, 2.5]
-    nu_ref: 1.5
-    length_scale_sampling: true
-    length_scale_range: [0.1, 0.5]
-    length_scale_ref: 0.3
-    mean: 1.0e-12
-    range: [1.0e-13, 1.0e-10]
-    fluctuation_std: 0.5
-    force_identity_reduction: false
-    mean_sampling: true
-    mean_range: [1.0e-13, 1.0e-10]
 
 # ===========================================================
 # (b) Model A — Surrogate (reduced params → settlement)
@@ -263,7 +204,14 @@ model_b:
 
   # ── Model hyperparams ───────────────────────────────────────────────────────
   type: "nn"
-  training_signal: "surrogate"   # "surrogate" | "physics"
+  # training_signal options:
+  #   "surrogate" : loss = ||Y_true - surrogate(reducer(ξ_full))||  (fast, differentiable)
+  #   "physics"   : loss = ||Y_true - Biot(reconstruct(reducer(ξ_full)))||  (slow)
+  #   "hybrid"    : surrogate loss + periodic physics update every physics_check_interval
+  #                 epochs, weighted by hybrid_alpha (recommended)
+  training_signal: "surrogate"
+  hybrid_alpha: 0.1           # physics loss weight (used when training_signal=hybrid)
+  physics_check_interval: 10  # run physics batch every N epochs (used when training_signal=hybrid)
   nn:
     hidden_dims: [256, 128, 64]
     epochs: 300
@@ -292,3 +240,4 @@ phase4:
   # shuffle: true means sample order is randomised (consistent with seed).
   random_seed: 0
   shuffle: true
+
