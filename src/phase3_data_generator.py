@@ -74,6 +74,20 @@ class Phase3DataGenerator:
         print(f"[Phase 3 DataGen] Done. X_full: {X_full.shape}, Y_full: {Y_full.shape}")
         return X_full, Y_full
 
+    def generate_single(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate a single unseen sample in the full parameter space.
+
+        Used for hybrid physics checks during Phase-3 training.
+
+        Returns
+        -------
+        X : (1, full_dim)
+        Y : (1, n_nodes_x)
+        """
+        X_full, fields, _ = self._fm_full.generate_dataset(1)
+        Y_full = self._solver.run_batch(fields["E"], fields["k_h"], fields["k_v"])
+        return X_full, Y_full
+
     def save(self, X_full: np.ndarray, Y_full: np.ndarray) -> Dict[str, str]:
         """Persist dataset to disk."""
         self._output_dir.mkdir(parents=True, exist_ok=True)

@@ -241,36 +241,16 @@ _DEFAULTS: Dict[str, Any] = {
                 "mean_sampling": True, "mean_range": [1.0e-13, 1.0e-10],
             },
         },
-        # reduced_fields is ALWAYS synchronised from phase2.reduced_fields
-        # by _sync_reduced_fields().  Do NOT set this manually — it is listed
-        # here only so that the defaults dict is self-consistent; it will be
-        # overwritten at runtime by the phase2 value.
-        "reduced_fields": {
-            "E": {
-                "n_terms": 8, "basis": "dct", "seed": 142,
-                "nu_sampling": False, "nu_ref": 1.5,
-                "length_scale_sampling": False, "length_scale_ref": 0.3,
-                "mean": 10.0e6, "range": [5.0e6, 20.0e6], "fluctuation_std": 1.0,
-                "mean_sampling": True, "mean_range": [5.0e6, 20.0e6],
-            },
-            "k_h": {
-                "n_terms": 0, "basis": "dct", "seed": 143,
-                "nu_sampling": False, "nu_ref": 1.5,
-                "length_scale_sampling": False, "length_scale_ref": 0.3,
-                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
-                "mean_sampling": True, "mean_range": [1.0e-13, 1.0e-10],
-            },
-            "k_v": {
-                "n_terms": 0, "basis": "dct", "seed": 144,
-                "nu_sampling": False, "nu_ref": 1.5,
-                "length_scale_sampling": False, "length_scale_ref": 0.3,
-                "mean": 1.0e-12, "range": [1.0e-13, 1.0e-10], "fluctuation_std": 0.5,
-                "mean_sampling": True, "mean_range": [1.0e-13, 1.0e-10],
-            },
-        },
+        # reduced_fields is intentionally NOT included in defaults.
+        # It is ALWAYS set by _sync_reduced_fields() to equal phase2.reduced_fields.
+        # Keeping it absent from defaults prevents spurious mismatch warnings when
+        # the user changes model_a.fields (which updates phase2.reduced_fields)
+        # without explicitly touching phase3.reduced_fields.
         # --- Model (reducer architecture + training) ---
         "reducer_type": "nn",
         "training_signal": "surrogate",
+        "hybrid_alpha": 0.1,
+        "physics_check_interval": 10,
         "output_dir": "models/phase3_reducer",
         "surrogate_dir": "models/phase2_surrogate",
         "load_phase2_model": None,
@@ -551,20 +531,23 @@ class ConfigManager:
 
     def _validate(self) -> None:
         """Basic sanity checks on the merged configuration."""
-        rf = self._cfg["random_fields"]
-        for name in ("E", "k_h", "k_v"):
-            if name not in rf:
-                raise ValueError(f"random_fields.{name} section is missing from config")
-            field_cfg = rf[name]
-            if field_cfg.get("basis", "dct") != "dct":
-                raise ValueError(
-                    f"random_fields.{name}.basis must be 'dct'; "
-                    f"got '{field_cfg.get('basis')}'"
-                )
-            if field_cfg["n_terms"] < 0:
-                raise ValueError(
-                    f"random_fields.{name}.n_terms must be >= 0"
-                )
+        # random_fields is optional for the two-model pipeline (Phase 2 + 3).
+        # It is only required when Phase 1 is explicitly run.
+        rf = self._cfg.get("random_fields")
+        if rf is not None:
+            for name in ("E", "k_h", "k_v"):
+                if name not in rf:
+                    continue
+                field_cfg = rf[name]
+                if field_cfg.get("basis", "dct") != "dct":
+                    raise ValueError(
+                        f"random_fields.{name}.basis must be 'dct'; "
+                        f"got '{field_cfg.get('basis')}'"
+                    )
+                if "n_terms" in field_cfg and field_cfg["n_terms"] < 0:
+                    raise ValueError(
+                        f"random_fields.{name}.n_terms must be >= 0"
+                    )
 
         grid = self._cfg["grid"]
         for key in ("n_nodes_x", "n_nodes_z"):
@@ -732,7 +715,8 @@ class ConfigManager:
                     p3["collocation_n_points"] = mb["collocation_n_points"]
                 if "type" in mb:
                     p3["reducer_type"] = mb["type"]
-                for k in ("training_signal", "surrogate_dir", "load_phase2_model", "nn"):
+                for k in ("training_signal", "surrogate_dir", "load_phase2_model",
+                          "hybrid_alpha", "physics_check_interval", "nn"):
                     if k in mb:
                         p3[k] = copy.deepcopy(mb[k])
                 if "evaluation" in mb:
@@ -829,7 +813,8 @@ class ConfigManager:
                 if "type" in m_red:
                     p3["reducer_type"] = m_red["type"]
                 for k in ("training_signal", "output_dir", "surrogate_dir",
-                          "load_phase2_model", "nn"):
+                          "load_phase2_model", "hybrid_alpha",
+                          "physics_check_interval", "nn"):
                     if k in m_red:
                         p3[k] = copy.deepcopy(m_red[k])
 

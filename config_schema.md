@@ -76,9 +76,11 @@ the Phase-2 value wins.  This prevents the reducer→surrogate broadcast error.
 
 ---
 
-## `random_fields` — Material Random Field Definitions (Phase-1 only)
+## `random_fields` — Material Random Field Definitions (Phase-1 only, optional)
 
-Base field definitions used by Phase 1 only.  For Phase 2 and Phase 3, use
+Base field definitions used by Phase 1 only.  **This section is optional for the
+two-model pipeline (Model A + Model B) — omit it entirely from your config when
+not running Phase 1.**  For Phase 2 and Phase 3, use
 `model_a.fields` / `model_b.fields` (or `data_generation.surrogate/reducer.fields`).
 
 All three fields (`E`, `k_h`, `k_v`) share the same 2D DCT-II basis and differ only in the parameters below.
@@ -201,7 +203,9 @@ as `random_fields`.  The reducer **output** dimension is automatically derived f
 | `surrogate_dir` | str | `"models/phase2_surrogate"` | Path to load the Phase-2 surrogate. |
 | `load_phase2_model` | str or null | `null` | Path to a specific `.pt` file; overrides auto-detection. |
 | `type` | str | `"nn"` | Currently only `"nn"`. |
-| `training_signal` | str | `"surrogate"` | `"surrogate"` or `"physics"`. |
+| `training_signal` | str | `"surrogate"` | `"surrogate"`, `"physics"`, or `"hybrid"`. |
+| `hybrid_alpha` | float | `0.1` | Physics loss weight in hybrid mode. |
+| `physics_check_interval` | int | `10` | Run Biot check every N epochs (hybrid mode only). |
 | `nn` | dict | see defaults | NN hyperparams: `hidden_dims`, `epochs`, `lr`, `batch_size`, `patience`. |
 
 #### `model_b.evaluation`
@@ -263,4 +267,4 @@ as `random_fields`.  The reducer **output** dimension is automatically derived f
 | `"data"` | Model A | Pure data-driven: fit surrogate to (X, Y). |
 | `"physics"` | Model A, B | Direct Biot solver evaluations (accurate, slow). |
 | `"surrogate"` | Model B | Use Phase-2 surrogate as a differentiable oracle. |
-| `"hybrid"` | Model A, B | Weighted combination: `α * physics + (1-α) * surrogate/data`. |
+| `"hybrid"` | Model A, B | Model A: weighted combination `α * physics + data`. Model B: surrogate loss + periodic physics gradient update every `physics_check_interval` epochs, weighted by `hybrid_alpha`. Both data loss and physics check MSE are logged. |

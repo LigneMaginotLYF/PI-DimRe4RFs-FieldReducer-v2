@@ -245,9 +245,12 @@ class Phase3Reducer:
         )
 
         # --- 6. Train ---
-        if signal_type == "surrogate" and surrogate is not None:
+        if signal_type in ("surrogate", "hybrid") and surrogate is not None:
             self._reducer = self._train_with_surrogate(
-                X_tr, Y_tr, X_test_full, Y_test_full, surrogate, p3_nn
+                X_tr, Y_tr, X_test_full, Y_test_full, surrogate, p3_nn,
+                hybrid=(signal_type == "hybrid"),
+                hybrid_alpha=float(p3.get("hybrid_alpha", 0.1)),
+                check_interval=int(p3.get("physics_check_interval", 10)),
             )
         else:
             self._reducer = self._train_with_physics(
@@ -333,10 +336,19 @@ class Phase3Reducer:
         Y_val: Optional[np.ndarray],
         surrogate: BaseSurrogate,
         p3_nn: Dict,
+        hybrid: bool = False,
+        hybrid_alpha: float = 0.1,
+        check_interval: int = 10,
     ) -> _ReducerNet:
         """Gradient-based training: loss = ||Y_full - P2(P3(ξ_full))||.
 
         Phase-2 surrogate is frozen; only reducer parameters are updated.
+
+        When ``hybrid=True``, a periodic physics check is performed every
+        ``check_interval`` epochs: a new full-space sample is generated, the
+        Biot solver provides ground-truth settlement, and an extra gradient
+        update is applied using the physics result as the target (weighted by
+        ``hybrid_alpha``).  Both data loss and physics check loss are logged.
         """
         net = _ReducerNet(
             self.full_dim, self.reduced_dim,
@@ -408,7 +420,7 @@ class Phase3Reducer:
 
             avg_loss = epoch_loss / max(n_batches, 1)
 
-            # Validation
+            # Validation (computed every epoch for early stopping)
             net.eval()
             with torch.no_grad():
                 red_full_n = net(X_t)
@@ -418,7 +430,19 @@ class Phase3Reducer:
                 val_loss = loss_fn(pred_t, Y_t).item()
             net.train()
 
-            if (epoch + 1) % 20 == 0:
+            # Hybrid physics check every check_interval epochs
+            if hybrid and (epoch + 1) % check_interval == 0:
+                physics_mse = self._apply_hybrid_physics_update(
+                    net, optimiser, loss_fn,
+                    Xr_mean_t, Xr_std_t,
+                    hybrid_alpha,
+                )
+                print(
+                    f"[Phase 3] Epoch {epoch+1:4d}/{epochs} | "
+                    f"data_loss={avg_loss:.4e} | val_loss={val_loss:.4e} | "
+                    f"physics_check_MSE={physics_mse:.4e} (hybrid)"
+                )
+            elif (epoch + 1) % 20 == 0:
                 print(
                     f"[Phase 3] Epoch {epoch+1:4d}/{epochs} | "
                     f"train_loss={avg_loss:.4e} | val_loss={val_loss:.4e}"
@@ -438,6 +462,94 @@ class Phase3Reducer:
             net.load_state_dict(best_state)
         net.eval()
         return net
+
+    def _apply_hybrid_physics_update(
+        self,
+        net: _ReducerNet,
+        optimiser: "torch.optim.Optimizer",
+        loss_fn: "torch.nn.Module",
+        Xr_mean_t: "torch.Tensor",
+        Xr_std_t: "torch.Tensor",
+        hybrid_alpha: float,
+    ) -> float:
+        """Generate one new full-space sample, run the Biot solver for ground
+        truth, then perform a weighted gradient update using the physics result
+        as the target.
+
+        Parameters
+        ----------
+        net : reducer network (must be in train mode on return)
+        optimiser : current Adam optimiser
+        loss_fn : MSELoss
+        Xr_mean_t, Xr_std_t : reduced-space normalisation tensors
+        hybrid_alpha : weight applied to the physics loss term
+
+        Returns
+        -------
+        physics_mse : float — MSE between physics ground truth and reducer
+            output passed through the Biot solver (for logging).
+        """
+        # 1. Generate one new physics sample in FULL parameter space
+        x_full_new, y_phys = self._data_gen.generate_single()
+
+        # 2. Normalise the full-space input
+        x_full_n = (x_full_new - self._X_mean) / self._X_std
+        x_full_t = torch.tensor(x_full_n, dtype=torch.float32, device=self.device)
+
+        # 3. Compute physics MSE for logging (no grad needed)
+        net.eval()
+        with torch.no_grad():
+            red_n = net(x_full_t)
+            red_denorm = (red_n * Xr_std_t + Xr_mean_t).cpu().numpy()
+        fields = self._fm_reduced.reconstruct_all_fields(red_denorm)
+        y_pred_physics = self._solver.run_batch(
+            fields["E"], fields["k_h"], fields["k_v"]
+        )
+        physics_mse = float(np.mean((y_pred_physics - y_phys) ** 2))
+        net.train()
+
+        # 4. Extra gradient update: use physics ground truth as target
+        #    The surrogate-decode path (reducer → Biot) is non-differentiable,
+        #    so we use y_phys directly as a fixed target and backprop through
+        #    the reducer only (treating physics output as a supervised label).
+        y_phys_t = torch.tensor(y_phys, dtype=torch.float32, device=self.device)
+
+        # We need a differentiable prediction of settlement from this sample.
+        # Use the surrogate if available; otherwise skip the gradient update.
+        surrogate = self._surrogate
+        if surrogate is not None and hasattr(surrogate, "_model") and surrogate._model is not None:
+            surr_X_mean = torch.tensor(
+                surrogate._X_mean, dtype=torch.float32, device=self.device
+            )
+            surr_X_std = torch.tensor(
+                surrogate._X_std, dtype=torch.float32, device=self.device
+            )
+            surr_Y_mean = torch.tensor(
+                surrogate._Y_mean, dtype=torch.float32, device=self.device
+            )
+            surr_Y_std = torch.tensor(
+                surrogate._Y_std, dtype=torch.float32, device=self.device
+            )
+            net.train()
+            optimiser.zero_grad()
+            red_n = net(x_full_t)
+            red_denorm_t = red_n * Xr_std_t + Xr_mean_t
+            surr_Xn = (red_denorm_t - surr_X_mean) / surr_X_std
+            surr_pred_n = surrogate._model(surr_Xn)
+            surr_pred = surr_pred_n * surr_Y_std + surr_Y_mean
+            if surrogate.output_repr != "direct":
+                surr_pred_np = surr_pred.detach().cpu().numpy()
+                surr_pred_np = surrogate._reconstruct_output(surr_pred_np)
+                surr_pred = torch.tensor(
+                    surr_pred_np, dtype=torch.float32, device=self.device
+                )
+            phys_loss = hybrid_alpha * loss_fn(surr_pred, y_phys_t)
+            phys_loss.backward()
+            optimiser.step()
+
+        return physics_mse
+
+
 
     def _train_with_physics(
         self,
