@@ -878,3 +878,291 @@ class TestPhase4SeedControl:
             perm[:3], np.array([0, 1, 2]),
             err_msg="shuffle=False should return first n samples in order"
         )
+
+
+# ---------------------------------------------------------------------------
+# I) Canonical model_a / model_b config format + dim-consistency enforcement
+# ---------------------------------------------------------------------------
+
+class TestCanonicalModelABFormat:
+    """Tests for the new canonical model_a / model_b config format."""
+
+    def test_model_a_translates_to_phase2(self):
+        """model_a keys must be correctly translated to internal phase2 keys."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "model_a": {
+                "fields": {
+                    "E": {
+                        "n_terms": 5, "mean": 10.0e6, "range": [5e6, 20e6],
+                        "fluctuation_std": 1.0, "seed": 1,
+                    },
+                    "k_h": {
+                        "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 2,
+                    },
+                    "k_v": {
+                        "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 3,
+                    },
+                },
+                "n_samples": 123,
+                "output_dir": "/tmp/ma_test",
+                "type": "nn",
+                "training_signal": "data",
+                "evaluation": {"test_fraction": 0.15, "n_plot_samples": 7},
+            },
+        })
+        cfg = cm.cfg
+        assert cfg["phase2"]["n_training_samples"] == 123
+        assert cfg["phase2"]["output_dir"] == "/tmp/ma_test"
+        assert cfg["phase2"]["surrogate_type"] == "nn"
+        assert cfg["phase2"]["training_signal"] == "data"
+        assert cfg["phase2"]["reduced_fields"]["E"]["n_terms"] == 5
+        assert cfg["phase2"]["evaluation"]["test_fraction"] == 0.15
+        assert cfg["phase2"]["evaluation"]["n_plot_samples"] == 7
+
+    def test_model_b_translates_to_phase3(self):
+        """model_b keys must be correctly translated to internal phase3 keys."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "model_b": {
+                "fields": {
+                    "E": {
+                        "n_terms": 10, "mean": 10.0e6, "range": [5e6, 20e6],
+                        "fluctuation_std": 1.0, "seed": 42,
+                    },
+                    "k_h": {
+                        "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 43,
+                    },
+                    "k_v": {
+                        "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 44,
+                    },
+                },
+                "n_samples": 456,
+                "output_dir": "/tmp/mb_test",
+                "training_signal": "surrogate",
+                "evaluation": {
+                    "test_fraction": 0.2,
+                    "n_plot_samples": 5,
+                    "plot_mode": "three_curve",
+                },
+            },
+        })
+        cfg = cm.cfg
+        assert cfg["phase3"]["n_training_samples"] == 456
+        assert cfg["phase3"]["output_dir"] == "/tmp/mb_test"
+        assert cfg["phase3"]["training_signal"] == "surrogate"
+        assert cfg["phase3"]["full_fields"]["E"]["n_terms"] == 10
+        assert cfg["phase3"]["evaluation"]["plot_mode"] == "three_curve"
+
+    def test_model_a_fields_propagate_to_phase3_reduced_fields(self):
+        """model_a.fields must propagate to phase3.reduced_fields (single source of truth)."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "model_a": {
+                "fields": {
+                    "E": {
+                        "n_terms": 6, "mean": 10.0e6, "range": [5e6, 20e6],
+                        "fluctuation_std": 1.0, "seed": 1,
+                    },
+                    "k_h": {
+                        "n_terms": 2, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 2,
+                    },
+                    "k_v": {
+                        "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                        "fluctuation_std": 0.5, "seed": 3,
+                    },
+                },
+                "training_signal": "data",
+            },
+        })
+        cfg = cm.cfg
+        # phase2.reduced_fields must come from model_a.fields
+        assert cfg["phase2"]["reduced_fields"]["E"]["n_terms"] == 6
+        assert cfg["phase2"]["reduced_fields"]["k_h"]["n_terms"] == 2
+        assert cfg["phase2"]["reduced_fields"]["k_v"]["n_terms"] == 0
+        # phase3.reduced_fields must be IDENTICAL to phase2.reduced_fields
+        assert cfg["phase3"]["reduced_fields"]["E"]["n_terms"] == 6
+        assert cfg["phase3"]["reduced_fields"]["k_h"]["n_terms"] == 2
+        assert cfg["phase3"]["reduced_fields"]["k_v"]["n_terms"] == 0
+
+
+class TestDimConsistencyEnforcement:
+    """Tests for the _sync_reduced_fields dimension-consistency guarantee."""
+
+    def test_sync_reduced_fields_corrects_mismatch(self):
+        """When phase2 and phase3 reduced_fields differ, phase2 wins + warning emitted."""
+        import warnings
+        from src.config_manager import ConfigManager
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(overrides={
+                "phase2": {
+                    "surrogate_type": "nn",
+                    "output_repr": "direct",
+                    "training_signal": "data",
+                    "reduced_fields": {
+                        "E": {
+                            "n_terms": 7, "mean": 10.0e6, "range": [5e6, 20e6],
+                            "fluctuation_std": 1.0, "seed": 1,
+                        },
+                        "k_h": {
+                            "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2,
+                        },
+                        "k_v": {
+                            "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3,
+                        },
+                    },
+                },
+                "phase3": {
+                    "training_signal": "surrogate",
+                    "reduced_fields": {
+                        "E": {
+                            "n_terms": 3,  # DIFFERENT from phase2 → mismatch
+                            "mean": 10.0e6, "range": [5e6, 20e6],
+                            "fluctuation_std": 1.0, "seed": 1,
+                        },
+                        "k_h": {
+                            "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2,
+                        },
+                        "k_v": {
+                            "n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3,
+                        },
+                    },
+                },
+            })
+
+        cfg = cm.cfg
+        # After sync: phase3 must equal phase2
+        assert cfg["phase3"]["reduced_fields"]["E"]["n_terms"] == 7, (
+            "phase3.reduced_fields.E.n_terms should be synced to phase2 value (7)"
+        )
+        # A UserWarning about the mismatch should have been emitted
+        mismatch_warns = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "mismatch" in str(w.message).lower()
+        ]
+        assert mismatch_warns, (
+            "Expected a UserWarning about dimension mismatch, none was emitted."
+        )
+
+    def test_no_warning_when_reduced_fields_match(self):
+        """No mismatch warning when phase2 and phase3 reduced_fields are consistent."""
+        import warnings
+        from src.config_manager import ConfigManager
+
+        _rf = {
+            "E": {"n_terms": 4, "mean": 10.0e6, "range": [5e6, 20e6],
+                  "fluctuation_std": 1.0, "seed": 1},
+            "k_h": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                    "fluctuation_std": 0.5, "seed": 2},
+            "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                    "fluctuation_std": 0.5, "seed": 3},
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(overrides={
+                "phase2": {
+                    "surrogate_type": "nn", "output_repr": "direct",
+                    "training_signal": "data", "reduced_fields": _rf,
+                },
+                "phase3": {
+                    "training_signal": "surrogate",
+                    "reduced_fields": _rf,
+                },
+            })
+
+        mismatch_warns = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "mismatch" in str(w.message).lower()
+        ]
+        assert not mismatch_warns, (
+            f"Unexpected mismatch warning when fields are consistent: {mismatch_warns}"
+        )
+
+    def test_phase3_reduced_fields_always_synced_from_phase2(self):
+        """After construction, phase3.reduced_fields must always equal phase2.reduced_fields."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "phase2": {
+                "surrogate_type": "nn", "output_repr": "direct",
+                "training_signal": "data",
+                "reduced_fields": {
+                    "E": {"n_terms": 9, "mean": 10.0e6, "range": [5e6, 20e6],
+                          "fluctuation_std": 1.0, "seed": 1},
+                    "k_h": {"n_terms": 1, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 2},
+                    "k_v": {"n_terms": 0, "mean": 1e-12, "range": [1e-13, 1e-10],
+                            "fluctuation_std": 0.5, "seed": 3},
+                },
+            },
+        })
+        cfg = cm.cfg
+        p2_rf = cfg["phase2"]["reduced_fields"]
+        p3_rf = cfg["phase3"]["reduced_fields"]
+        for field in ("E", "k_h", "k_v"):
+            assert p2_rf[field]["n_terms"] == p3_rf[field]["n_terms"], (
+                f"{field}: phase2 n_terms={p2_rf[field]['n_terms']} != "
+                f"phase3 n_terms={p3_rf[field]['n_terms']}"
+            )
+
+    def test_config_yaml_passes_dim_consistency(self):
+        """The repo config.yaml must load without any dim-consistency warnings."""
+        import warnings
+        from pathlib import Path
+        from src.config_manager import ConfigManager
+
+        yaml_path = Path(__file__).parent.parent / "config.yaml"
+        if not yaml_path.exists():
+            pytest.skip("config.yaml not found")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cm = ConfigManager(path=str(yaml_path))
+
+        mismatch_warns = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "mismatch" in str(w.message).lower()
+        ]
+        assert not mismatch_warns, (
+            "config.yaml produces dim-consistency warnings:\n"
+            + "\n".join(str(w.message) for w in mismatch_warns)
+        )
+
+    def test_plot_mode_default_is_three_curve(self):
+        """Default plot_mode must be 'three_curve'."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager()
+        plot_mode = cm.cfg["phase3"]["evaluation"].get("plot_mode")
+        assert plot_mode == "three_curve", (
+            f"Expected default plot_mode='three_curve', got '{plot_mode}'"
+        )
+
+    def test_plot_mode_two_curve_accepted(self):
+        """plot_mode 'two_curve' must be accepted without error."""
+        from src.config_manager import ConfigManager
+
+        cm = ConfigManager(overrides={
+            "phase3": {
+                "training_signal": "surrogate",
+                "evaluation": {"plot_mode": "two_curve"},
+            }
+        })
+        assert cm.cfg["phase3"]["evaluation"]["plot_mode"] == "two_curve"

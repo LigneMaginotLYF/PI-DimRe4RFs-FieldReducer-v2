@@ -82,8 +82,11 @@ class Phase3Evaluator:
         self._solver = BiotSolver(self._cfg)
 
         p3_eval = p3.get("evaluation", {})
-        self._test_fraction: float = float(p3_eval.get("test_fraction", 0.2))
-        self._n_plot_samples: int = int(p3_eval.get("n_plot_samples", 5))
+        self._test_fraction: float = float(p3_eval.get("test_fraction", 0.1))
+        self._n_plot_samples: int = int(p3_eval.get("n_plot_samples", 10))
+        # plot_mode: "three_curve" → GT + Biot + Surrogate
+        #            "two_curve"   → GT + Biot only
+        self._plot_mode: str = str(p3_eval.get("plot_mode", "three_curve"))
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,9 +233,15 @@ class Phase3Evaluator:
 
         plots: Dict[str, str] = {}
 
-        # --- Settlement comparison plot (3 curves when surrogate available) ---
+        # --- Settlement comparison plot ---
+        # three_curve: GT + Biot + Surrogate (requires surrogate to be available)
+        # two_curve:   GT + Biot only
         n_nodes_x = Y_test_full.shape[1]
         plot_path = plots_dir / "settlement_comparison.png"
+        show_surrogate = (
+            self._plot_mode == "three_curve"
+            and Y_surr is not None
+        )
         plot_settlement_comparison_global_y(
             y_true=Y_test_full,
             y_pred=Y_biot,
@@ -243,7 +252,7 @@ class Phase3Evaluator:
             n_samples=self._n_plot_samples,
             label_true="P(full fields) [ground truth]",
             label_pred="P(reduced fields) [Biot]",
-            y_pred_surrogate=Y_surr,
+            y_pred_surrogate=Y_surr if show_surrogate else None,
             label_pred_surrogate="P2(reduced params) [surrogate]",
         )
         plots["settlement_comparison"] = str(plot_path)
